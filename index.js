@@ -68,18 +68,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return interaction.reply(`🏓 pong! ${client.ws.ping}ms`);
   }
 
-  if (interaction.commandName === "halo") {
-    const replies = [
-      `halo **${interaction.user.username}** 👋\nselamat datang di 404 society`,
-      `hai **${interaction.user.username}**\nsantai aja, kamu udah di 404 society`,
-      `halo **${interaction.user.username}** 👀\nnyasar? enggak kok, ini 404 society`,
-      `yo **${interaction.user.username}** 😄\nwelcome to 404 society`,
-      `halo **${interaction.user.username}**\nini rumahnya orang-orang yang “nggak ketemu”`,
-      `hai **${interaction.user.username}** ✨\n404 society selalu kebuka buat kamu`,
-    ];
-    const reply = replies[Math.floor(Math.random() * replies.length)];
-    return interaction.reply(reply);
-  }
+if (interaction.commandName === "halo") {
+  const serverName = interaction.guild?.name || "realm ini";
+
+  const replies = [
+    `✨ salam, **${interaction.user.username}**.\nsebuah jiwa baru menyapa di **${serverName}**.`,
+    `🌙 gerbang berpendar pelan saat **${interaction.user.username}** berbicara.\nselamat datang di **${serverName}**.`,
+    `🔮 suaramu menggema di dalam **${serverName}**, **${interaction.user.username}**.\nsemoga langkahmu di sini menyenangkan.`,
+    `🕯️ salam hangat, **${interaction.user.username}**.\n**${serverName}** menyambut kehadiranmu.`,
+    `🌌 sebuah sapaan sederhana membuka percakapan.\nselamat datang **${interaction.user.username}** di **${serverName}**.`,
+    `✨ cahaya lembut menyertai salam darimu.\n**${serverName}** selalu terbuka untukmu, **${interaction.user.username}**.`,
+  ];
+
+  const reply = replies[Math.floor(Math.random() * replies.length)];
+  return interaction.reply(reply);
+}
 
   // ✅ test welcome (admin only)
   if (interaction.commandName === "testwelcome") {
