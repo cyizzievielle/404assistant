@@ -33,7 +33,7 @@ const {
 } = require("discord.js");
 
 // ✅ npm i canvas
-const { createCanvas, loadImage } = require("canvas");
+const { createCanvas, loadImage,registerFont } = require("canvas");
 
 // ===================== BRAND =====================
 const BRAND_NAME = "HOV Assistant";
@@ -226,11 +226,11 @@ async function renderIdCard({
 
   // header
   ctx.fillStyle = ink;
-  ctx.font = "700 48px Arial";
+  ctx.font = "700 48px Inter";
   ctx.fillText(`HOV IDENTITY CARD`, x + 34, y + 82);
 
   ctx.fillStyle = subInk;
-  ctx.font = "600 20px Arial";
+  ctx.font = "600 20px Inter";
   ctx.fillText("House of Valeria • Verified in the Arcane", x + 36, y + 114);
 
   ctx.strokeStyle = line;
@@ -248,11 +248,11 @@ async function renderIdCard({
   const drawRow = (label, value, i) => {
     const yy = topListY + i * rowGap;
     ctx.fillStyle = subInk;
-    ctx.font = "700 18px Arial";
+    ctx.font = "700 18px Inter";
     ctx.fillText(label, lx, yy);
 
     ctx.fillStyle = ink;
-    ctx.font = "700 22px Arial";
+    ctx.font = "700 22px Inter";
     ctx.fillText(value, lx + 210, yy);
   };
 
@@ -265,7 +265,7 @@ async function renderIdCard({
 
   // footer left
   ctx.fillStyle = subInk;
-  ctx.font = "600 16px Arial";
+  ctx.font = "600 16px Inter";
   ctx.fillText(`© HOV • ${BRAND_NAME}`, x + 36, y + ch - 28);
 
   // right avatar
@@ -298,7 +298,7 @@ async function renderIdCard({
 
   ctx.textAlign = "center";
   ctx.fillStyle = subInk;
-  ctx.font = "700 16px Arial";
+  ctx.font = "700 16px Inter";
   ctx.fillText("🕰️ Tanggal Dibuat", cx, dateTop);
 
   ctx.strokeStyle = line;
@@ -309,7 +309,7 @@ async function renderIdCard({
   ctx.stroke();
 
   ctx.fillStyle = ink;
-  ctx.font = "700 18px Arial";
+  ctx.font = "700 48px Inter";
   ctx.fillText(createdAtText, cx, dateTop + 38);
 
   ctx.textAlign = "left";
