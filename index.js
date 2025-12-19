@@ -228,7 +228,7 @@ async function renderIdCard({
 
   ctx.fillStyle = subInk;
   ctx.font = "600 20px Inter, Arial";
-  ctx.fillText("Arcane Registry • Verified in the realm", x + 36, y + 114);
+  ctx.fillText("House of Valerie • Verified in the arcane", x + 36, y + 114);
 
   // divider
   ctx.strokeStyle = line;
@@ -260,12 +260,6 @@ async function renderIdCard({
   drawRow("Domisili", domisili, 3);
   drawRow("Hobi", hobi, 4);
   drawRow("Status", status, 5);
-
-  // tagline (posisi rapi di bawah list kiri)
-  const taglineY = topListY + 6 * rowGap + 22; // setelah row terakhir
-  ctx.fillStyle = subInk;
-  ctx.font = "600 18px Inter, Arial";
-  ctx.fillText("terdaftar sebagai jiwa sah di realm HOV", lx, taglineY);
 
   // footer left
   ctx.fillStyle = subInk;
@@ -303,7 +297,7 @@ async function renderIdCard({
   ctx.textAlign = "center";
   ctx.fillStyle = subInk;
   ctx.font = "700 16px Inter, Arial";
-  ctx.fillText("🕰️ Tanggal Dibuat", cx, dateTop);
+  ctx.fillText("Tanggal Dibuat", cx, dateTop);
 
   ctx.strokeStyle = line;
   ctx.lineWidth = 2;
