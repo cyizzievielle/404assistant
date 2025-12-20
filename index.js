@@ -611,11 +611,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (id === "menfess:submit") {
         const ch = await getChannelById(interaction.guild, process.env.MENFESS_CHANNEL_ID);
         if (!ch) {
-          return interaction.reply({
-            content: "Channel menfess tidak ketemu / bot tidak punya akses / bukan text channel.",
-            ephemeral: true,
-          });
-        }
+        console.warn("[MENFESS] Channel invalid saat interaction:", interaction.type);
+        return; // cukup stop, jangan ganggu user
+      }
+
 
         const to = interaction.fields.getTextInputValue("to_initial").trim();
         const aliasRaw = (interaction.fields.getTextInputValue("alias") || "").trim();
