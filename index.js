@@ -57,13 +57,31 @@ const FONT_BOLD = path.join(__dirname, "assets", "fonts", "Inter-Bold.ttf");
 
 // ===================== CLIENT =====================
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    // NOTE: tidak perlu GuildMessages/MessageContent karena bot tidak baca chat.
+  ],
 });
 
+// biar bot gak crash kalau ada error async / promise
+process.on("unhandledRejection", (reason) => console.error("[unhandledRejection]", reason));
+process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
+client.on("error", (err) => console.error("[client error]", err));
+
 // ===================== UTILS =====================
-function getChannelById(guild, id) {
+async function getChannelById(guild, id) {
   if (!guild || !id) return null;
-  const ch = guild.channels.cache.get(id);
+
+  let ch = guild.channels.cache.get(id) || null;
+  if (!ch) {
+    try {
+      ch = await guild.channels.fetch(id);
+    } catch {
+      return null;
+    }
+  }
+
   if (!ch) return null;
   if (!ch.isTextBased()) return null;
   return ch;
@@ -142,17 +160,7 @@ function genCardNumber(userId) {
 }
 
 // ===================== ID CARD RENDER =====================
-async function renderIdCard({
-  theme,
-  number,
-  name,
-  gender,
-  domisili,
-  hobi,
-  status,
-  avatarUrl,
-  createdAtText,
-}) {
+async function renderIdCard({ theme, number, name, gender, domisili, hobi, status, avatarUrl, createdAtText }) {
   const w = 980;
   const h = 560;
   const canvas = createCanvas(w, h);
@@ -203,7 +211,10 @@ async function renderIdCard({
 
   // panel
   const pad = 34;
-  const x = pad, y = pad, cw = w - pad * 2, ch = h - pad * 2;
+  const x = pad,
+    y = pad,
+    cw = w - pad * 2,
+    ch = h - pad * 2;
 
   ctx.save();
   ctx.shadowColor = "rgba(0,0,0,.35)";
@@ -292,7 +303,7 @@ async function renderIdCard({
 
   // tanggal (di bawah avatar, naik dikit, ukuran pas)
   const cx = px + pw / 2;
-  const dateTop = py + ph + 18; // lebih naik dari sebelumnya
+  const dateTop = py + ph + 18;
 
   ctx.textAlign = "center";
   ctx.fillStyle = subInk;
@@ -318,12 +329,7 @@ async function renderIdCard({
 client.once(Events.ClientReady, (c) => {
   console.log(`ONLINE AS: ${c.user.tag} | ID: ${c.user.id}`);
 
-  const statuses = [
-    "🌙 menjaga gerbang realm",
-    "🔮 merapalkan pesan welcome",
-    "🕯️ menemani kalian ngobrol",
-    "✨ ketik /halo untuk menyapa",
-  ];
+  const statuses = ["🌙 menjaga gerbang realm", "🔮 merapalkan pesan welcome", "🕯️ menemani kalian ngobrol", "✨ ketik /halo untuk menyapa"];
 
   let i = 0;
   const setStatus = () => {
@@ -341,24 +347,20 @@ client.once(Events.ClientReady, (c) => {
 
 // ===================== AUTO WELCOME =====================
 client.on(Events.GuildMemberAdd, async (member) => {
-  const channel = getChannelById(member.guild, process.env.GENERAL_CHANNEL_ID);
+  const channel = await getChannelById(member.guild, process.env.GENERAL_CHANNEL_ID);
   if (!channel) return;
 
   const mention = `<@${member.id}>`;
   const guildName = `**${member.guild.name}**`;
 
-  const msg = WELCOME_MESSAGES[Math.floor(Math.random() * WELCOME_MESSAGES.length)](
-    mention,
-    guildName
-  );
-
+  const msg = WELCOME_MESSAGES[Math.floor(Math.random() * WELCOME_MESSAGES.length)](mention, guildName);
   channel.send(msg).catch(console.error);
 });
 
-// ===================== INTERACTIONS =====================
+// ===================== INTERACTIONS (SINGLE ROUTER) =====================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // ============ SLASH ============
+    // ===================== SLASH =====================
     if (interaction.isChatInputCommand()) {
       const name = interaction.commandName;
 
@@ -399,19 +401,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (name === "userinfo") {
         const user = interaction.options.getUser("user") || interaction.user;
-        const member = interaction.guild?.members.cache.get(user.id) || null;
+
+        // fetch member biar join date gak null walau gak kecache
+        const member = interaction.guild ? await interaction.guild.members.fetch(user.id).catch(() => null) : null;
 
         const created = `<t:${Math.floor(user.createdTimestamp / 1000)}:F>`;
-        const joined = member ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>` : "—";
+        const joined = member?.joinedTimestamp ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>` : "—";
 
         const roles =
           member?.roles.cache
-            .filter((r) => r.id !== interaction.guild.id)
+            .filter((r) => interaction.guild && r.id !== interaction.guild.id)
             .map((r) => r.toString())
             .slice(0, 15) || [];
 
         const rolesText =
-          roles.length > 0 ? roles.join(" ") + (member.roles.cache.size - 1 > 15 ? " …" : "") : "—";
+          roles.length > 0 ? roles.join(" ") + ((member?.roles.cache.size || 1) - 1 > 15 ? " …" : "") : "—";
 
         const embed = new EmbedBuilder()
           .setTitle(`👤 User Info — ${user.username}`)
@@ -433,8 +437,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!g) return interaction.reply({ content: "Ini cuma bisa dipakai di server ya 👀", ephemeral: true });
 
         const owner = await g.fetchOwner().catch(() => null);
-        const channels = g.channels.cache;
-        const textCount = channels.filter((c) => c.isTextBased()).size;
+
+        const channels = await g.channels.fetch().catch(() => g.channels.cache);
+        const textCount = channels.filter((c) => c?.isTextBased?.()).size;
+        const voiceCount = channels.filter((c) => c?.isVoiceBased?.()).size;
+
+        const boosts = g.premiumSubscriptionCount || 0;
+        const boostTier = g.premiumTier ?? 0;
 
         const embed = new EmbedBuilder()
           .setTitle(`🏰 Server Info — ${g.name}`)
@@ -442,8 +451,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .addFields(
             { name: "👑 Owner", value: owner ? `<@${owner.id}>` : "Unknown", inline: true },
             { name: "👥 Members", value: `${g.memberCount}`, inline: true },
-            { name: "💬 Text Channels", value: `${textCount}`, inline: true },
+            { name: "💎 Boost", value: `Tier ${boostTier} • ${boosts} boosts`, inline: true },
+            { name: "💬 Channels", value: `Text: ${textCount}\nVoice: ${voiceCount}\nTotal: ${channels.size}`, inline: true },
             { name: "🎭 Roles", value: `${g.roles.cache.size}`, inline: true },
+            { name: "✅ Verification", value: `${g.verificationLevel}`, inline: true },
             { name: "📅 Created", value: `<t:${Math.floor(g.createdTimestamp / 1000)}:F>`, inline: false }
           )
           .setFooter({ text: `Server ID: ${g.id}` })
@@ -457,8 +468,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.reply({ content: "command ini cuma buat admin ya 👀", ephemeral: true });
         }
 
-        const ch = getChannelById(interaction.guild, process.env.MENFESS_CHANNEL_ID);
-        if (!ch) return interaction.reply({ content: "MENFESS_CHANNEL_ID belum valid di .env", ephemeral: true });
+        const ch = await getChannelById(interaction.guild, process.env.MENFESS_CHANNEL_ID);
+        if (!ch) {
+          return interaction.reply({
+            content: "MENFESS_CHANNEL_ID tidak ketemu / bot tidak punya akses / bukan text channel.",
+            ephemeral: true,
+          });
+        }
 
         const embed = new EmbedBuilder()
           .setTitle("🕯️ MENFESS")
@@ -466,11 +482,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setFooter({ text: "No doxxing / hate / threat. Keep it safe." });
 
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("menfess:new")
-            .setLabel("Kirim Menfess")
-            .setStyle(ButtonStyle.Success)
-            .setEmoji("✉️")
+          new ButtonBuilder().setCustomId("menfess:new").setLabel("Kirim Menfess").setStyle(ButtonStyle.Success).setEmoji("✉️")
         );
 
         await ch.send({ embeds: [embed], components: [row] });
@@ -484,11 +496,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setFooter({ text: "Theme: isi Status pakai `| dark` atau `| light` (contoh: single | dark)" });
 
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("idcard:open")
-            .setLabel("Buat / Update ID")
-            .setStyle(ButtonStyle.Primary)
-            .setEmoji("🪪")
+          new ButtonBuilder().setCustomId("idcard:open").setLabel("Buat / Update ID").setStyle(ButtonStyle.Primary).setEmoji("🪪")
         );
 
         return interaction.reply({ embeds: [embed], components: [row] });
@@ -497,11 +505,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // ============ BUTTON ============
+    // ===================== BUTTONS =====================
     if (interaction.isButton()) {
       const id = interaction.customId;
 
-      // --- MENFESS NEW
+      // pakai ELSE IF chain biar showModal cuma kepanggil sekali
       if (id === "menfess:new") {
         const cdSec = Number(process.env.MENFESS_COOLDOWN_SEC || 60);
         const now = Date.now();
@@ -542,10 +550,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         );
 
         return interaction.showModal(modal);
-      }
-
-      // --- MENFESS REPLY
-      if (id.startsWith("menfess:reply:")) {
+      } else if (id.startsWith("menfess:reply:")) {
         const menfessId = id.split(":")[2];
 
         const modal = new ModalBuilder()
@@ -561,18 +566,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         modal.addComponents(new ActionRowBuilder().addComponents(reply));
         return interaction.showModal(modal);
-      }
-
-      // --- ID CARD OPEN
-      if (id === "idcard:open") {
+      } else if (id === "idcard:open") {
         const modal = new ModalBuilder().setCustomId("idcard:submit").setTitle(`🪪 ${ID_CARD_TITLE}`);
 
-        const nameInput = new TextInputBuilder()
-          .setCustomId("name")
-          .setLabel("Nama")
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(24)
-          .setRequired(true);
+        const nameInput = new TextInputBuilder().setCustomId("name").setLabel("Nama").setStyle(TextInputStyle.Short).setMaxLength(24).setRequired(true);
 
         const genderInput = new TextInputBuilder()
           .setCustomId("gender")
@@ -581,19 +578,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setMaxLength(8)
           .setRequired(true);
 
-        const domInput = new TextInputBuilder()
-          .setCustomId("dom")
-          .setLabel("Domisili")
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(24)
-          .setRequired(true);
+        const domInput = new TextInputBuilder().setCustomId("dom").setLabel("Domisili").setStyle(TextInputStyle.Short).setMaxLength(24).setRequired(true);
 
-        const hobiInput = new TextInputBuilder()
-          .setCustomId("hobi")
-          .setLabel("Hobi")
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(30)
-          .setRequired(true);
+        const hobiInput = new TextInputBuilder().setCustomId("hobi").setLabel("Hobi").setStyle(TextInputStyle.Short).setMaxLength(30).setRequired(true);
 
         const statusInput = new TextInputBuilder()
           .setCustomId("status")
@@ -616,14 +603,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // ============ MODAL ============
+    // ===================== MODALS =====================
     if (interaction.isModalSubmit()) {
       const id = interaction.customId;
 
       // --- MENFESS SUBMIT
       if (id === "menfess:submit") {
-        const ch = getChannelById(interaction.guild, process.env.MENFESS_CHANNEL_ID);
-        if (!ch) return interaction.reply({ content: "MENFESS_CHANNEL_ID belum valid di .env", ephemeral: true });
+        const ch = await getChannelById(interaction.guild, process.env.MENFESS_CHANNEL_ID);
+        if (!ch) {
+          return interaction.reply({
+            content: "Channel menfess tidak ketemu / bot tidak punya akses / bukan text channel.",
+            ephemeral: true,
+          });
+        }
 
         const to = interaction.fields.getTextInputValue("to_initial").trim();
         const aliasRaw = (interaction.fields.getTextInputValue("alias") || "").trim();
@@ -634,6 +626,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.reply({ content: "Nama tidak boleh mengandung mention / nyamar staff ya.", ephemeral: true });
         }
 
+        // cooldown diset di sini biar aman
         const cdSec = Number(process.env.MENFESS_COOLDOWN_SEC || 60);
         const now = Date.now();
         const last = menfessCooldown.get(interaction.user.id) || 0;
@@ -681,8 +674,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const post = db.posts[String(menfessId)];
         if (!post) return interaction.reply({ content: "Menfess asal tidak ditemukan (mungkin sudah kehapus).", ephemeral: true });
 
-        const ch = getChannelById(interaction.guild, post.channelId);
-        if (!ch) return interaction.reply({ content: "Channel menfess tidak valid.", ephemeral: true });
+        const ch = await getChannelById(interaction.guild, post.channelId);
+        if (!ch) return interaction.reply({ content: "Channel menfess tidak valid / bot tidak punya akses.", ephemeral: true });
 
         const anon = getAnonLabel(db, interaction.user.id);
         saveMenfessDB(db);
@@ -727,9 +720,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const db = loadIdDB();
         const uid = interaction.user.id;
 
-        if (!db.users[uid]) {
-          db.users[uid] = { number: genCardNumber(uid), createdAt: Date.now() };
-        }
+        if (!db.users[uid]) db.users[uid] = { number: genCardNumber(uid), createdAt: Date.now() };
         db.users[uid] = { ...db.users[uid], ...payload, updatedAt: Date.now() };
         saveIdDB(db);
 
@@ -739,7 +730,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           year: "numeric",
         });
 
-        // IMPORTANT: modal submit -> langsung deferReply sekali, lalu editReply
+        // modal submit -> deferReply SEKALI, lalu editReply
         await interaction.deferReply({ ephemeral: false });
 
         const png = await renderIdCard({
@@ -757,11 +748,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const file = new AttachmentBuilder(png, { name: "hov_idcard.png" });
 
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("idcard:open")
-            .setLabel("Buat / Update ID")
-            .setStyle(ButtonStyle.Primary)
-            .setEmoji("🪪")
+          new ButtonBuilder().setCustomId("idcard:open").setLabel("Buat / Update ID").setStyle(ButtonStyle.Primary).setEmoji("🪪")
         );
 
         return interaction.editReply({
