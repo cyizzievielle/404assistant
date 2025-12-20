@@ -1,57 +1,59 @@
 require("dotenv").config();
-const { REST, Routes, SlashCommandBuilder } = require("discord.js");
+const { REST, Routes } = require("discord.js");
 
 const commands = [
-  new SlashCommandBuilder().setName("ping").setDescription("cek ping bot"),
-  new SlashCommandBuilder().setName("halo").setDescription("sapa bot"),
-  new SlashCommandBuilder().setName("about").setDescription("info tentang bot"),
-  new SlashCommandBuilder().setName("serverinfo").setDescription("info tentang server ini"),
+  { name: "ping", description: "Cek latency bot" },
+  { name: "halo", description: "Sapa bot" },
+  { name: "about", description: "Info bot" },
 
-  new SlashCommandBuilder()
-    .setName("avatar")
-    .setDescription("lihat avatar user")
-    .addUserOption((opt) =>
-      opt.setName("user").setDescription("pilih user (opsional)").setRequired(false)
-    ),
+  {
+    name: "userinfo",
+    description: "Lihat info user",
+    options: [
+      { name: "user", description: "Pilih user (opsional)", type: 6, required: false }, // USER
+    ],
+  },
 
-  new SlashCommandBuilder()
-    .setName("userinfo")
-    .setDescription("info user")
-    .addUserOption((opt) =>
-      opt.setName("user").setDescription("pilih user (opsional)").setRequired(false)
-    ),
+  {
+    name: "avatar",
+    description: "Lihat avatar user",
+    options: [
+      { name: "user", description: "Pilih user (opsional)", type: 6, required: false }, // USER
+    ],
+  },
 
-  new SlashCommandBuilder()
-    .setName("testwelcome")
-    .setDescription("test welcome (admin only)"),
+  { name: "serverinfo", description: "Lihat info server" },
+  { name: "menfesspanel", description: "Kirim panel menfess ke channel menfess (Admin only)" },
+  { name: "idcard", description: "Buka panel pembuatan HOV Identity Card" },
 
-  new SlashCommandBuilder()
-    .setName("menfesspanel")
-    .setDescription("kirim panel menfess ke channel menfess (admin only)"),
+  {
+    name: "afk",
+    description: "Set status AFK kamu",
+    options: [{ name: "reason", description: "Alasan AFK (opsional)", type: 3, required: false }], // STRING
+  },
 
-  new SlashCommandBuilder()
-    .setName("idcard")
-    .setDescription("buat HOV IDENTITY CARD (dark/light via form)"),
-].map((cmd) => cmd.toJSON());
+  { name: "registry", description: "Lihat daftar warga yang sudah punya HOV ID Card" },
+];
 
-const rest = new REST({ version: "10" });
+async function main() {
+  const token = process.env.DISCORD_TOKEN;
+  const clientId = process.env.CLIENT_ID;
+  const guildId = process.env.GUILD_ID;
 
-(async () => {
+  if (!token || !clientId || !guildId) {
+    console.error("ENV kurang. Pastikan DISCORD_TOKEN, CLIENT_ID, GUILD_ID ada di .env");
+    process.exit(1);
+  }
+
+  const rest = new REST({ version: "10" }).setToken(token);
+
   try {
-    if (!process.env.DISCORD_TOKEN) throw new Error("DISCORD_TOKEN belum ada di .env");
-    if (!process.env.CLIENT_ID) throw new Error("CLIENT_ID belum ada di .env");
-    if (!process.env.GUILD_ID) throw new Error("GUILD_ID belum ada di .env");
-
-    rest.setToken(process.env.DISCORD_TOKEN);
-
-    console.log("⏳ registering slash commands...");
-
-    await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID), {
-      body: commands,
-    });
-
-    console.log("✅ slash commands registered!");
+    console.log("Deploying guild commands...");
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+    console.log("✅ Done deploy guild commands!");
   } catch (err) {
     console.error(err);
   }
-})();
+}
+
+main();
