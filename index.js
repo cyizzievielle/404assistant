@@ -1012,7 +1012,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       // ✅ /myhouse (PUBLIC + bisa lihat orang lain)
       if (name === "myhouse") {
         if (!interaction.guild) {
-          return interaction.reply({ content: "Command ini cuma bisa dipakai di server ya.", ephemeral: true });
+          return interaction.reply({ content: "Command ini cuma bisa dipakai di server ya.", ephemeral: false });
         }
 
         const targetUser = interaction.options.getUser("user") || interaction.user;
@@ -1118,7 +1118,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const locked = getSortedUser(interaction.user.id);
         if (locked) {
           const when = Math.floor((locked.at || Date.now()) / 1000);
-          const text = locked.choice === "light" ? "✨ Light Arcana" : "🌙 Dark Arcana";
+          const text = locked.choice === "light" ? "<:light:1452229058841542748> Light Arcana" : "<:dark:1452229004663849052> Dark Arcana";
           return interaction.reply({
             content: `🔒 Kamu sudah tersortir ke **${text}**.\nSejak: <t:${when}:F>\n\nTidak bisa sorting ulang.`,
             ephemeral: true,
@@ -1162,9 +1162,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const roleIdToAdd = choice === "light" ? lightRoleId : darkRoleId;
         await member.roles.add(roleIdToAdd).catch((e) => console.error("[SORTING] add role failed:", e));
 
-        const finalText = choice === "light" ? "✨ **LIGHT ARCANA**" : "🌙 **DARK ARCANA**";
+        const finalText = choice === "light" ? "<:light:1452229058841542748> **LIGHT ARCANE**" : "<:dark:1452229004663849052> **DARK ARCANE**";
         await interaction.editReply({
-          content: `🧙‍♀️ Arcane telah memutuskan...\nKamu masuk ke ${finalText}!\n\n📨 House Card kamu dikirim ke channel hasil.\n🔒 Ritual terkunci (1x saja).`,
+          content: `<:witch:1452256560108666977> Arcane telah memutuskan...\nKamu masuk ke ${finalText}!\n\n📨 House Card kamu dikirim ke channel hasil.\n🔒 Ritual terkunci (1x saja).`,
         });
 
         // kirim house card ke channel result
