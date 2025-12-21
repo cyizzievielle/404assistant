@@ -770,7 +770,7 @@ async function postHouseCard(guild, user, choice) {
   const embed = new EmbedBuilder()
     .setTitle("🪪 Valerie House Card")
     .setColor(EMBED_COLOR)
-    .setDescription([`**Member:** <@${user.id}>`, `**Arcana:** ${choice === "dark" ? "🌙 Dark Arcana" : "✨ Light Arcana"}`].join("\n"))
+    .setDescription([`**Member:** <@${user.id}>`, `**Arcana:** ${choice === "dark" ? "<:dark:1452229004663849052> Dark Arcana" : "<:light:1452229058841542748> Light Arcana"}`].join("\n"))
     .setImage(`attachment://house_card_${user.id}.png`)
     .setFooter({ text: "House of Valerie • Arcane Registry" })
     .setTimestamp();
