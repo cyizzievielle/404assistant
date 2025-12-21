@@ -1,5 +1,5 @@
 /**
- * index.js — HOV Assistant (FULL FIX)
+ * index.js — HOV Assistant (FULL FIX - COPY PASTE)
  * (Welcome + Menfess + HOV Identity Card + Registry + AFK + Avatar + Sorting (IDCard-required) + HouseCard + /myhouse)
  * discord.js v14
  * npm i discord.js dotenv canvas
@@ -40,7 +40,7 @@ const {
   TextInputBuilder,
   TextInputStyle,
   AttachmentBuilder,
-  MessageFlags,
+  InteractionResponseFlags,
 } = require("discord.js");
 
 const { createCanvas, loadImage, registerFont } = require("canvas");
@@ -91,6 +91,41 @@ function safeText(s, max = 32) {
 function requireEnv(name) {
   const v = process.env[name];
   return v && String(v).trim().length ? String(v).trim() : null;
+}
+
+/** Reply helper biar ga kena 40060 */
+async function safeReply(interaction, payload) {
+  try {
+    if (interaction.deferred) return await interaction.editReply(payload);
+    if (interaction.replied) return await interaction.followUp(payload);
+    return await interaction.reply(payload);
+  } catch (e) {
+    console.error("[safeReply]", e?.message || e);
+  }
+}
+async function safeDeferReply(interaction, opts) {
+  try {
+    if (interaction.deferred || interaction.replied) return;
+    return await interaction.deferReply(opts);
+  } catch (e) {
+    console.error("[safeDeferReply]", e?.message || e);
+  }
+}
+async function safeDeferUpdate(interaction) {
+  try {
+    if (interaction.deferred || interaction.replied) return;
+    return await interaction.deferUpdate();
+  } catch (e) {
+    console.error("[safeDeferUpdate]", e?.message || e);
+  }
+}
+async function safeShowModal(interaction, modal) {
+  try {
+    if (interaction.deferred || interaction.replied) return; // udah ack
+    return await interaction.showModal(modal);
+  } catch (e) {
+    console.error("[safeShowModal]", e?.message || e);
+  }
 }
 
 /**
@@ -324,10 +359,7 @@ async function renderIdCard({ theme, number, name, gender, domisili, hobi, statu
   ctx.globalAlpha = 1;
 
   const pad = 34;
-  const x = pad,
-    y = pad,
-    cw = w - pad * 2,
-    ch = h - pad * 2;
+  const x = pad, y = pad, cw = w - pad * 2, ch = h - pad * 2;
 
   ctx.save();
   ctx.shadowColor = "rgba(0,0,0,.35)";
@@ -456,7 +488,7 @@ async function renderIdCard({ theme, number, name, gender, domisili, hobi, statu
   return canvas.toBuffer("image/png");
 }
 
-// ===================== HOUSE CARD RENDER (avatar di samping) =====================
+// ===================== HOUSE CARD RENDER =====================
 async function renderHouseCard({ choice, name, gender, hovId, avatarUrl }) {
   const w = 980;
   const h = 360;
@@ -466,7 +498,6 @@ async function renderHouseCard({ choice, name, gender, hovId, avatarUrl }) {
 
   const isDark = choice === "dark";
 
-  // palettes
   const bgA = isDark ? "#0b0716" : "#ffffff";
   const bgB = isDark ? "#14102a" : "#cfefff";
   const bgC = isDark ? "#071a2f" : "#fff2b8";
@@ -507,10 +538,7 @@ async function renderHouseCard({ choice, name, gender, hovId, avatarUrl }) {
   drawParticles(ctx, { x: 0, y: 0, w, h }, isDark ? "dark" : "light");
 
   const pad = 26;
-  const x = pad,
-    y = pad,
-    cw = w - pad * 2,
-    ch = h - pad * 2;
+  const x = pad, y = pad, cw = w - pad * 2, ch = h - pad * 2;
 
   ctx.save();
   ctx.shadowColor = "rgba(0,0,0,.35)";
@@ -553,33 +581,9 @@ async function renderHouseCard({ choice, name, gender, hovId, avatarUrl }) {
   row("Gender", safeText(gender, 10), 1);
   row("HOV ID", safeText(hovId, 24), 2);
 
-  // avatar right (bulat, samping)
   const avSize = 190;
   const avX = x + cw - avSize - 44;
   const avY = y + 96;
-
-  ctx.save();
-  ctx.globalAlpha = 0.9;
-  const ring = ctx.createRadialGradient(
-    avX + avSize / 2,
-    avY + avSize / 2,
-    avSize / 5,
-    avX + avSize / 2,
-    avY + avSize / 2,
-    avSize / 1.05
-  );
-  if (isDark) {
-    ring.addColorStop(0, "rgba(167,139,250,.55)");
-    ring.addColorStop(1, "rgba(15,23,42,0)");
-  } else {
-    ring.addColorStop(0, "rgba(255,242,184,.55)");
-    ring.addColorStop(1, "rgba(147,197,253,0)");
-  }
-  ctx.fillStyle = ring;
-  ctx.beginPath();
-  ctx.arc(avX + avSize / 2, avY + avSize / 2, avSize / 1.65, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
 
   ctx.save();
   ctx.beginPath();
@@ -713,7 +717,6 @@ function sortingPanelRow() {
 client.once(Events.ClientReady, async (c) => {
   console.log(`ONLINE AS: ${c.user.tag} | ID: ${c.user.id}`);
 
-  // Debug env biar gak “katanya udah diisi” tapi ternyata beda process/.env
   console.log("[ENV]", {
     GUILD_ID: requireEnv("GUILD_ID"),
     MENFESS_CHANNEL_ID: requireEnv("MENFESS_CHANNEL_ID"),
@@ -850,14 +853,11 @@ async function postHouseCard(guild, user, choice) {
 // ===================== INTERACTIONS =====================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // FIX: anti double-ack (40060) kalau ada handler/proses dobel
-    if (interaction.replied || interaction.deferred) return;
-
     // ===================== SLASH =====================
     if (interaction.isChatInputCommand()) {
       const name = interaction.commandName;
 
-      if (name === "ping") return interaction.reply(`🏓 pong! ${client.ws.ping}ms`);
+      if (name === "ping") return safeReply(interaction, { content: `🏓 pong! ${client.ws.ping}ms` });
 
       if (name === "halo") {
         const serverName = interaction.guild?.name || "realm ini";
@@ -867,7 +867,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           `🔮 suaramu menggema di dalam **${serverName}**, **${interaction.user.username}**.\nsemoga langkahmu di sini menyenangkan.`,
           `🕯️ salam hangat, **${interaction.user.username}**.\n**${serverName}** menyambut kehadiranmu.`,
         ];
-        return interaction.reply(replies[Math.floor(Math.random() * replies.length)]);
+        return safeReply(interaction, { content: replies[Math.floor(Math.random() * replies.length)] });
       }
 
       if (name === "about") {
@@ -890,7 +890,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setFooter({ text: `ID: ${client.user.id}` })
           .setTimestamp();
 
-        return interaction.reply({ embeds: [embed] });
+        return safeReply(interaction, { embeds: [embed] });
       }
 
       if (name === "userinfo") {
@@ -922,7 +922,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           )
           .setTimestamp();
 
-        return interaction.reply({ embeds: [embed] });
+        return safeReply(interaction, { embeds: [embed] });
       }
 
       if (name === "avatar") {
@@ -943,20 +943,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
           )
           .setTimestamp();
 
-        return interaction.reply({ embeds: [embed] });
+        return safeReply(interaction, { embeds: [embed] });
       }
 
       if (name === "afk") {
         const reason = interaction.options.getString("reason") || "AFK";
         setAfk(interaction.user.id, reason);
-        return interaction.reply({
+        return safeReply(interaction, {
           content: `🕯️ <@${interaction.user.id}> sekarang **AFK** — ${safeText(reason, 80)}`,
           allowedMentions: { parse: [] },
         });
       }
 
       if (name === "registry") {
-        if (!interaction.guild) return interaction.reply({ content: "Command ini cuma bisa dipakai di server ya.", flags: MessageFlags.Ephemeral });
+        if (!interaction.guild)
+          return safeReply(interaction, { content: "Command ini cuma bisa dipakai di server ya.", flags: InteractionResponseFlags.Ephemeral });
 
         await interaction.guild.members.fetch({ withPresences: false }).catch(() => null);
 
@@ -967,12 +968,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const embed = registryEmbed(interaction.guild, pages, pageIndex);
         const row = registryRow(pageIndex, pages.length);
 
-        return interaction.reply({ embeds: [embed], components: [row], allowedMentions: { parse: [] } });
+        return safeReply(interaction, { embeds: [embed], components: [row], allowedMentions: { parse: [] } });
       }
 
       if (name === "serverinfo") {
         const g = interaction.guild;
-        if (!g) return interaction.reply({ content: "Ini cuma bisa dipakai di server ya 👀", flags: MessageFlags.Ephemeral });
+        if (!g) return safeReply(interaction, { content: "Ini cuma bisa dipakai di server ya 👀", flags: InteractionResponseFlags.Ephemeral });
 
         const owner = await g.fetchOwner().catch(() => null);
         const channels = await g.channels.fetch().catch(() => g.channels.cache);
@@ -998,19 +999,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setFooter({ text: `Server ID: ${g.id}` })
           .setTimestamp();
 
-        return interaction.reply({ embeds: [embed], allowedMentions: { parse: [] } });
+        return safeReply(interaction, { embeds: [embed], allowedMentions: { parse: [] } });
       }
 
       if (name === "menfesspanel") {
+        if (!interaction.inGuild()) {
+          return safeReply(interaction, {
+            content: "⚠️ Command ini harus dipakai di server (bukan DM/App chat).",
+            flags: InteractionResponseFlags.Ephemeral,
+          });
+        }
+
         if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          return interaction.reply({ content: "command ini cuma buat admin ya 👀", flags: MessageFlags.Ephemeral });
+          return safeReply(interaction, { content: "command ini cuma buat admin ya 👀", flags: InteractionResponseFlags.Ephemeral });
         }
 
         const res = await getTextChannelOrExplain(interaction.guild, requireEnv("MENFESS_CHANNEL_ID"));
         if (!res.ok) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: `⚠️ MENFESS panel gagal: ${explainChannelError(res)}`,
-            flags: MessageFlags.Ephemeral,
+            flags: InteractionResponseFlags.Ephemeral,
           });
         }
         const ch = res.channel;
@@ -1026,7 +1034,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         );
 
         await ch.send({ embeds: [embed], components: [row], allowedMentions: { parse: [] } });
-        return interaction.reply({ content: "✅ panel menfess terkirim ke channel menfess.", flags: MessageFlags.Ephemeral });
+        return safeReply(interaction, { content: "✅ panel menfess terkirim ke channel menfess.", flags: InteractionResponseFlags.Ephemeral });
       }
 
       if (name === "idcard") {
@@ -1040,46 +1048,47 @@ client.on(Events.InteractionCreate, async (interaction) => {
           new ButtonBuilder().setCustomId("idcard:open").setLabel("Buat / Update ID").setStyle(ButtonStyle.Primary).setEmoji("🪪")
         );
 
-        return interaction.reply({ embeds: [embed], components: [row] });
+        return safeReply(interaction, { embeds: [embed], components: [row] });
       }
 
       if (name === "sortingpanel") {
+        if (!interaction.inGuild()) {
+          return safeReply(interaction, {
+            content: "⚠️ Command ini harus dipakai di server (bukan DM/App chat).",
+            flags: InteractionResponseFlags.Ephemeral,
+          });
+        }
+
         if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          return interaction.reply({ content: "command ini cuma buat admin ya 👀", flags: MessageFlags.Ephemeral });
+          return safeReply(interaction, { content: "command ini cuma buat admin ya 👀", flags: InteractionResponseFlags.Ephemeral });
         }
 
         const targetChannelId = requireEnv("SORTING_CHANNEL_ID") || interaction.channelId;
         const res = await getTextChannelOrExplain(interaction.guild, targetChannelId);
         if (!res.ok) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: `⚠️ Sorting panel gagal: ${explainChannelError(res)}`,
-            flags: MessageFlags.Ephemeral,
+            flags: InteractionResponseFlags.Ephemeral,
           });
         }
 
-        await res.channel.send({
-          embeds: [sortingPanelEmbed()],
-          components: [sortingPanelRow()],
-          allowedMentions: { parse: [] },
-        });
-
-        return interaction.reply({ content: "✅ panel sorting terkirim.", flags: MessageFlags.Ephemeral });
+        await res.channel.send({ embeds: [sortingPanelEmbed()], components: [sortingPanelRow()], allowedMentions: { parse: [] } });
+        return safeReply(interaction, { content: "✅ panel sorting terkirim.", flags: InteractionResponseFlags.Ephemeral });
       }
 
-      // ✅ /myhouse (PUBLIC + bisa lihat orang lain)
+      // /myhouse
       if (name === "myhouse") {
         if (!interaction.guild) {
-          return interaction.reply({ content: "Command ini cuma bisa dipakai di server ya.", ephemeral: false });
+          return safeReply(interaction, { content: "Command ini cuma bisa dipakai di server ya.", flags: InteractionResponseFlags.Ephemeral });
         }
 
         const targetUser = interaction.options.getUser("user") || interaction.user;
 
         const sorted = getSortedUser(targetUser.id);
         if (!sorted?.choice) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: `⚠️ ${targetUser.id === interaction.user.id ? "Kamu" : `<@${targetUser.id}>`} belum melakukan Arcane Sorting.`,
             allowedMentions: { parse: [] },
-            ephemeral: false,
           });
         }
 
@@ -1088,14 +1097,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!idData) {
           const idCh = requireEnv("IDCARD_CHANNEL_ID");
           const mention = idCh ? `<#${idCh}>` : "channel ID Card";
-          return interaction.reply({
-            content: `⚠️ ${targetUser.id === interaction.user.id ? "Kamu" : `<@${targetUser.id}>`} belum punya **Valerie ID Card**.\nSilahkan buat dulu di ${mention} dengan command **/idcard**.`,
+          return safeReply(interaction, {
+            content: `⚠️ ${targetUser.id === interaction.user.id ? "Kamu" : `<@${targetUser.id}>`} belum punya **Valerie ID Card**.\nBuat dulu di ${mention} dengan **/idcard**.`,
             allowedMentions: { parse: [] },
-            ephemeral: false,
           });
         }
 
-        await interaction.deferReply({ ephemeral: false });
+        await safeDeferReply(interaction, { ephemeral: false });
 
         const png = await renderHouseCard({
           choice: sorted.choice,
@@ -1125,11 +1133,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setFooter({ text: "House of Valerie • Arcane Registry" })
           .setTimestamp();
 
-        return interaction.editReply({
-          embeds: [embed],
-          files: [file],
-          allowedMentions: { parse: [] },
-        });
+        return safeReply(interaction, { embeds: [embed], files: [file], allowedMentions: { parse: [] } });
       }
 
       return;
@@ -1139,9 +1143,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton()) {
       const id = interaction.customId;
 
-      // Registry pagination
+      // registry pagination
       if (id.startsWith("registry:")) {
-        await interaction.deferUpdate();
+        await safeDeferUpdate(interaction);
 
         const [, action, currentStr] = id.split(":");
         const current = Number(currentStr || 0);
@@ -1161,20 +1165,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.message.edit({ embeds: [embed], components: [row], allowedMentions: { parse: [] } });
       }
 
-      // ✅ SORTING ROLL
+      // sorting
       if (id === "sorting:roll") {
+        if (!interaction.inGuild()) {
+          return safeReply(interaction, {
+            content: "⚠️ Sorting hanya bisa dipakai di server (bukan DM/App chat).",
+            flags: InteractionResponseFlags.Ephemeral,
+          });
+        }
+
         const lightRoleId = requireEnv("LIGHT_ROLE_ID");
         const darkRoleId = requireEnv("DARK_ROLE_ID");
         const idcardChannelId = requireEnv("IDCARD_CHANNEL_ID");
 
         if (!lightRoleId || !darkRoleId) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: `⚠️ LIGHT_ROLE_ID / DARK_ROLE_ID kosong.\n(light=${String(lightRoleId)} dark=${String(darkRoleId)})`,
-            flags: MessageFlags.Ephemeral,
+            flags: InteractionResponseFlags.Ephemeral,
           });
         }
 
-        // FIX: pastikan role beneran ada di guild ini
         const rLight = await getRoleOrExplain(interaction.guild, lightRoleId);
         const rDark = await getRoleOrExplain(interaction.guild, darkRoleId);
         if (!rLight.ok || !rDark.ok) {
@@ -1187,32 +1197,36 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ]
             .filter(Boolean)
             .join("\n");
-          return interaction.reply({ content: msg, flags: MessageFlags.Ephemeral });
+          return safeReply(interaction, { content: msg, flags: InteractionResponseFlags.Ephemeral });
         }
 
         const locked = getSortedUser(interaction.user.id);
         if (locked) {
           const when = Math.floor((locked.at || Date.now()) / 1000);
-          const text = locked.choice === "light" ? "<:light:1452229058841542748> Light Arcana" : "<:dark:1452229004663849052> Dark Arcana";
-          return interaction.reply({
+          const text =
+            locked.choice === "light"
+              ? "<:light:1452229058841542748> Light Arcana"
+              : "<:dark:1452229004663849052> Dark Arcana";
+          return safeReply(interaction, {
             content: `🔒 Kamu sudah tersortir ke **${text}**.\nSejak: <t:${when}:F>\n\nTidak bisa sorting ulang.`,
-            flags: MessageFlags.Ephemeral,
+            flags: InteractionResponseFlags.Ephemeral,
           });
         }
 
-        // cek ID card harus sudah ada
         const idDb = loadIdDB();
         const idData = idDb.users?.[interaction.user.id];
         if (!idData) {
           const mention = idcardChannelId ? `<#${idcardChannelId}>` : "channel ID Card";
-          return interaction.reply({
-            content: `⚠️ Kamu belum buat **Valerie ID Card**.\nSilahkan buat dulu di ${mention} dengan command **/idcard**.\n\nSetelah itu balik lagi dan klik **Mulai Ritual**.`,
-            flags: MessageFlags.Ephemeral,
+          return safeReply(interaction, {
+            content:
+              `⚠️ Kamu belum buat **Valerie ID Card**.\n` +
+              `Buat dulu di ${mention} dengan command **/idcard**.\n\n` +
+              `Setelah itu balik lagi dan klik **Mulai Ritual**.`,
+            flags: InteractionResponseFlags.Ephemeral,
           });
         }
 
-        // lanjut ritual
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        await safeDeferReply(interaction, { flags: InteractionResponseFlags.Ephemeral });
 
         const stages = [
           "🕯️ Lingkaran arcane menyala…",
@@ -1222,35 +1236,33 @@ client.on(Events.InteractionCreate, async (interaction) => {
           "📜 Keputusan hampir ditetapkan…",
         ];
         for (const s of stages) {
-          await interaction.editReply({ content: s });
+          await interaction.editReply({ content: s }).catch(() => {});
           await sleep(850);
         }
 
         const choice = Math.random() < 0.5 ? "light" : "dark";
-
-        // lock dulu anti spam
         setSortedUser(interaction.user.id, choice);
 
         const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
         if (!member) return interaction.editReply({ content: "⚠️ Gagal fetch member." });
 
         const roleIdToAdd = choice === "light" ? lightRoleId : darkRoleId;
-
-        // pastikan bot bisa manage roles
         await member.roles.add(roleIdToAdd).catch((e) => console.error("[SORTING] add role failed:", e));
 
-        const finalText = choice === "light" ? "<:light:1452229058841542748> **LIGHT ARCANE**" : "<:dark:1452229004663849052> **DARK ARCANE**";
+        const finalText =
+          choice === "light"
+            ? "<:light:1452229058841542748> **LIGHT ARCANE**"
+            : "<:dark:1452229004663849052> **DARK ARCANE**";
+
         await interaction.editReply({
           content: `<:witch:1452256560108666977> Arcane telah memutuskan...\nKamu masuk ke ${finalText}!\n\n📨 House Card kamu dikirim ke channel hasil.\n🔒 Ritual terkunci (1x saja).`,
         });
 
-        // kirim house card ke channel result
         await postHouseCard(interaction.guild, interaction.user, choice).catch((e) => console.error("[HOUSECARD] send failed:", e));
-
         return;
       }
 
-      // MENFESS new (open modal)
+      // menfess open modal
       if (id === "menfess:new") {
         const cdSec = Number(process.env.MENFESS_COOLDOWN_SEC || 60);
         const now = Date.now();
@@ -1258,7 +1270,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         if (now - last < cdSec * 1000) {
           const wait = Math.ceil((cdSec * 1000 - (now - last)) / 1000);
-          return interaction.reply({ content: `⏳ tunggu ${wait}s dulu ya.`, flags: MessageFlags.Ephemeral });
+          return safeReply(interaction, { content: `⏳ tunggu ${wait}s dulu ya.`, flags: InteractionResponseFlags.Ephemeral });
         }
 
         const modal = new ModalBuilder().setCustomId("menfess:submit").setTitle("✉️ Menfess Anon");
@@ -1290,13 +1302,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
           new ActionRowBuilder().addComponents(msgInput)
         );
 
-        return interaction.showModal(modal);
+        return safeShowModal(interaction, modal);
       }
 
+      // menfess reply open modal
       if (id.startsWith("menfess:reply:")) {
         const menfessId = id.split(":")[2];
 
-        const modal = new ModalBuilder().setCustomId(`menfess:reply_submit:${menfessId}`).setTitle(`🫣 Balas Anonim #${menfessId}`);
+        const modal = new ModalBuilder()
+          .setCustomId(`menfess:reply_submit:${menfessId}`)
+          .setTitle(`🫣 Balas Anonim #${menfessId}`);
 
         const reply = new TextInputBuilder()
           .setCustomId("reply_msg")
@@ -1306,14 +1321,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setRequired(true);
 
         modal.addComponents(new ActionRowBuilder().addComponents(reply));
-        return interaction.showModal(modal);
+        return safeShowModal(interaction, modal);
       }
 
-      // ID Card open
+      // idcard open modal
       if (id === "idcard:open") {
         const modal = new ModalBuilder().setCustomId("idcard:submit").setTitle(`🪪 ${ID_CARD_TITLE}`);
 
-        const nameInput = new TextInputBuilder().setCustomId("name").setLabel("Nama").setStyle(TextInputStyle.Short).setMaxLength(24).setRequired(true);
+        const nameInput = new TextInputBuilder()
+          .setCustomId("name")
+          .setLabel("Nama")
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(24)
+          .setRequired(true);
+
         const genderInput = new TextInputBuilder()
           .setCustomId("gender")
           .setLabel("Gender (L / P / W / dll)")
@@ -1321,8 +1342,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setMaxLength(8)
           .setRequired(true);
 
-        const domInput = new TextInputBuilder().setCustomId("dom").setLabel("Domisili").setStyle(TextInputStyle.Short).setMaxLength(24).setRequired(true);
-        const hobiInput = new TextInputBuilder().setCustomId("hobi").setLabel("Hobi").setStyle(TextInputStyle.Short).setMaxLength(30).setRequired(true);
+        const domInput = new TextInputBuilder()
+          .setCustomId("dom")
+          .setLabel("Domisili")
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(24)
+          .setRequired(true);
+
+        const hobiInput = new TextInputBuilder()
+          .setCustomId("hobi")
+          .setLabel("Hobi")
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(30)
+          .setRequired(true);
 
         const statusInput = new TextInputBuilder()
           .setCustomId("status")
@@ -1339,7 +1371,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           new ActionRowBuilder().addComponents(statusInput)
         );
 
-        return interaction.showModal(modal);
+        return safeShowModal(interaction, modal);
       }
 
       return;
@@ -1349,13 +1381,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isModalSubmit()) {
       const id = interaction.customId;
 
-      // MENFESS submit
+      // menfess submit
       if (id === "menfess:submit") {
+        if (!interaction.inGuild()) {
+          return safeReply(interaction, {
+            content: "⚠️ Menfess hanya bisa dipakai di server (bukan DM/App chat).",
+            flags: InteractionResponseFlags.Ephemeral,
+          });
+        }
+
         const res = await getTextChannelOrExplain(interaction.guild, requireEnv("MENFESS_CHANNEL_ID"));
         if (!res.ok) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: `⚠️ Menfess gagal: ${explainChannelError(res)}`,
-            flags: MessageFlags.Ephemeral,
+            flags: InteractionResponseFlags.Ephemeral,
           });
         }
         const ch = res.channel;
@@ -1364,9 +1403,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const aliasRaw = (interaction.fields.getTextInputValue("alias") || "").trim();
         const content = interaction.fields.getTextInputValue("msg").trim();
 
-        if (!to || !content) return interaction.reply({ content: "Form kosong 😭", flags: MessageFlags.Ephemeral });
+        if (!to || !content) {
+          return safeReply(interaction, { content: "Form kosong 😭", flags: InteractionResponseFlags.Ephemeral });
+        }
         if (aliasRaw && isBadAlias(aliasRaw)) {
-          return interaction.reply({ content: "Nama tidak boleh mengandung mention / nyamar staff ya.", flags: MessageFlags.Ephemeral });
+          return safeReply(interaction, {
+            content: "Nama tidak boleh mengandung mention / nyamar staff ya.",
+            flags: InteractionResponseFlags.Ephemeral,
+          });
         }
 
         const cdSec = Number(process.env.MENFESS_COOLDOWN_SEC || 60);
@@ -1374,7 +1418,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const last = menfessCooldown.get(interaction.user.id) || 0;
         if (now - last < cdSec * 1000) {
           const wait = Math.ceil((cdSec * 1000 - (now - last)) / 1000);
-          return interaction.reply({ content: `⏳ tunggu ${wait}s dulu ya.`, flags: MessageFlags.Ephemeral });
+          return safeReply(interaction, { content: `⏳ tunggu ${wait}s dulu ya.`, flags: InteractionResponseFlags.Ephemeral });
         }
         menfessCooldown.set(interaction.user.id, now);
 
@@ -1403,21 +1447,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
         db2.posts[String(menfessId)] = { messageId: sent.id, channelId: ch.id };
         saveMenfessDB(db2);
 
-        return interaction.reply({ content: "✅ menfess terkirim.", flags: MessageFlags.Ephemeral });
+        return safeReply(interaction, { content: "✅ menfess terkirim.", flags: InteractionResponseFlags.Ephemeral });
       }
 
-      // MENFESS reply submit
+      // menfess reply submit
       if (id.startsWith("menfess:reply_submit:")) {
         const menfessId = id.split(":")[2];
         const replyText = interaction.fields.getTextInputValue("reply_msg").trim();
-        if (!replyText) return interaction.reply({ content: "Balasan kosong 😭", flags: MessageFlags.Ephemeral });
+        if (!replyText) return safeReply(interaction, { content: "Balasan kosong 😭", flags: InteractionResponseFlags.Ephemeral });
 
         const db = loadMenfessDB();
         const post = db.posts[String(menfessId)];
-        if (!post) return interaction.reply({ content: "Menfess asal tidak ditemukan (mungkin sudah kehapus).", flags: MessageFlags.Ephemeral });
+        if (!post) return safeReply(interaction, { content: "Menfess asal tidak ditemukan (mungkin sudah kehapus).", flags: InteractionResponseFlags.Ephemeral });
 
         const res = await getTextChannelOrExplain(interaction.guild, post.channelId);
-        if (!res.ok) return interaction.reply({ content: `⚠️ Reply gagal: ${explainChannelError(res)}`, flags: MessageFlags.Ephemeral });
+        if (!res.ok) return safeReply(interaction, { content: `⚠️ Reply gagal: ${explainChannelError(res)}`, flags: InteractionResponseFlags.Ephemeral });
 
         const ch = res.channel;
 
@@ -1437,10 +1481,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           allowedMentions: { repliedUser: false, parse: [] },
         });
 
-        return interaction.reply({ content: "✅ balasan terkirim.", flags: MessageFlags.Ephemeral });
+        return safeReply(interaction, { content: "✅ balasan terkirim.", flags: InteractionResponseFlags.Ephemeral });
       }
 
-      // ID CARD submit
+      // idcard submit
       if (id === "idcard:submit") {
         const rawName = interaction.fields.getTextInputValue("name");
         const rawGender = interaction.fields.getTextInputValue("gender");
@@ -1477,7 +1521,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const sorted = getSortedUser(uid);
         const arcanaChoice = sorted?.choice || null;
 
-        await interaction.deferReply({ ephemeral: false });
+        await safeDeferReply(interaction, { ephemeral: false });
 
         const png = await renderIdCard({
           theme: payload.theme,
@@ -1505,7 +1549,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setImage("attachment://hov_idcard.png")
           .setTimestamp();
 
-        return interaction.editReply({
+        return safeReply(interaction, {
           embeds: [embed],
           files: [file],
           components: [row],
@@ -1518,7 +1562,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   } catch (err) {
     console.error(err);
     if (!interaction.replied && !interaction.deferred) {
-      return interaction.reply({ content: "⚠️ ada error di bot, coba lagi ya.", flags: MessageFlags.Ephemeral });
+      return safeReply(interaction, { content: "⚠️ ada error di bot, coba lagi ya.", flags: InteractionResponseFlags.Ephemeral });
     }
   }
 });
