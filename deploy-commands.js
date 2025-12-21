@@ -38,8 +38,11 @@ const commands = [
   new SlashCommandBuilder().setName("idcard").setDescription("buat / update HOV identity card"),
   new SlashCommandBuilder().setName("sortingpanel").setDescription("kirim panel Arcane Sorting (admin only)"),
 
-  // ✅ baru
-  new SlashCommandBuilder().setName("myhouse").setDescription("ambil Valerie House Card kamu"),
+  // ✅ /myhouse (public + bisa lihat orang lain)
+  new SlashCommandBuilder()
+    .setName("myhouse")
+    .setDescription("lihat Valerie House Card (punya kamu atau user lain)")
+    .addUserOption((o) => o.setName("user").setDescription("pilih user (opsional)").setRequired(false)),
 ].map((c) => c.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
@@ -50,6 +53,7 @@ const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
     const guildId = process.env.GUILD_ID;
 
     if (!clientId || !guildId) throw new Error("CLIENT_ID / GUILD_ID belum ada di .env");
+    if (!process.env.DISCORD_TOKEN) throw new Error("DISCORD_TOKEN belum ada di .env");
 
     console.log("Deploying slash commands...");
     await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });

@@ -339,7 +339,7 @@ async function renderIdCard({ theme, number, name, gender, domisili, hobi, statu
 
     ctx.fillStyle = ink;
     ctx.font = "700 16px Inter, Arial";
-    const label = arcanaChoice === "dark" ? "🌙 DARK ARCANA" : "✨ LIGHT ARCANA";
+    const label = arcanaChoice === "dark" ? "🌙 DARK ARCANE" : "✨ LIGHT ARCANE";
     ctx.fillText(label, bx + 16, by + 24);
   }
 
@@ -495,7 +495,7 @@ async function renderHouseCard({ choice, name, gender, hovId, avatarUrl }) {
 
   ctx.fillStyle = subInk;
   ctx.font = "700 20px Inter, Arial";
-  ctx.fillText(isDark ? "DARK ARCANA" : "LIGHT ARCANA", x + 34, y + 98);
+  ctx.fillText(isDark ? "DARK ARCANE" : "LIGHT ARCANE", x + 34, y + 98);
 
   const lx = x + 34;
   const top = y + 150;
@@ -770,8 +770,17 @@ async function postHouseCard(guild, user, choice) {
   const embed = new EmbedBuilder()
     .setTitle("🪪 Valerie House Card")
     .setColor(EMBED_COLOR)
-    .setDescription([`**Member:** <@${user.id}>`, `**Arcana:** ${choice === "dark" ? "<:dark:1452229004663849052> Dark Arcana" : "<:light:1452229058841542748> Light Arcana"}`].join("\n"))
-    .setImage(`attachment://house_card_${user.id}.png`)
+    .setDescription(
+      [
+        `**Member:** <@${user.id}>`,
+        `**Arcana:** ${
+          choice === "dark"
+            ? "<:dark:1452229004663849052> Dark Arcana"
+            : "<:light:1452229058841542748> Light Arcana"
+        }`,
+      ].join("\n")
+    )
+    .setImage(`attachment://${filename}`)
     .setFooter({ text: "House of Valerie • Arcane Registry" })
     .setTimestamp();
 
@@ -1000,49 +1009,73 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({ content: "✅ panel sorting terkirim.", ephemeral: true });
       }
 
-      // ✅ /myhouse
+      // ✅ /myhouse (PUBLIC + bisa lihat orang lain)
       if (name === "myhouse") {
-        if (!interaction.guild) return interaction.reply({ content: "Command ini cuma bisa dipakai di server ya.", ephemeral: true });
+        if (!interaction.guild) {
+          return interaction.reply({ content: "Command ini cuma bisa dipakai di server ya.", ephemeral: true });
+        }
 
-        const sorted = getSortedUser(interaction.user.id);
+        const targetUser = interaction.options.getUser("user") || interaction.user;
+
+        const sorted = getSortedUser(targetUser.id);
         if (!sorted?.choice) {
-          return interaction.reply({ content: "⚠️ Kamu belum melakukan Arcane Sorting. Klik panel sorting dulu ya.", ephemeral: true });
+          return interaction.reply({
+            content: `⚠️ ${targetUser.id === interaction.user.id ? "Kamu" : `<@${targetUser.id}>`} belum melakukan Arcane Sorting.`,
+            allowedMentions: { parse: [] },
+            ephemeral: false,
+          });
         }
 
         const idDb = loadIdDB();
-        const idData = idDb.users?.[interaction.user.id];
+        const idData = idDb.users?.[targetUser.id];
         if (!idData) {
           const idCh = requireEnv("IDCARD_CHANNEL_ID");
           const mention = idCh ? `<#${idCh}>` : "channel ID Card";
           return interaction.reply({
-            content: `⚠️ Kamu belum punya **Valerie ID Card**.\nSilahkan buat dulu di ${mention} dengan command **/idcard**.`,
-            ephemeral: true,
+            content: `⚠️ ${targetUser.id === interaction.user.id ? "Kamu" : `<@${targetUser.id}>`} belum punya **Valerie ID Card**.\nSilahkan buat dulu di ${mention} dengan command **/idcard**.`,
+            allowedMentions: { parse: [] },
+            ephemeral: false,
           });
         }
 
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ ephemeral: false });
 
         const png = await renderHouseCard({
           choice: sorted.choice,
-          name: idData.name || interaction.user.username,
+          name: idData.name || targetUser.username,
           gender: idData.gender || "—",
           hovId: idData.number || "—",
-          avatarUrl: interaction.user.displayAvatarURL({ extension: "png", size: 256 }),
+          avatarUrl: targetUser.displayAvatarURL({ extension: "png", size: 256 }),
         });
 
-        const filename = `my_house_${interaction.user.id}.png`;
+        const filename = `house_${targetUser.id}.png`;
         const file = new AttachmentBuilder(png, { name: filename });
 
         const embed = new EmbedBuilder()
-          .setTitle("🪪 My Valerie House Card")
+          .setTitle("🪪 Valerie House Card")
           .setColor(EMBED_COLOR)
-          .setDescription(`**Arcana:** ${sorted.choice === "dark" ? "🌙 Dark Arcana" : "✨ Light Arcana"}`)
+          .setDescription(
+            [
+              `**Member:** <@${targetUser.id}>`,
+              `**Arcane:** ${
+                sorted.choice === "dark"
+                  ? "<:dark:1452229004663849052> Dark Arcana"
+                  : "<:light:1452229058841542748> Light Arcana"
+              }`,
+            ].join("\n")
+          )
           .setImage(`attachment://${filename}`)
+          .setFooter({ text: "House of Valerie • Arcane Registry" })
           .setTimestamp();
 
-        return interaction.editReply({ embeds: [embed], files: [file] });
+        return interaction.editReply({
+          embeds: [embed],
+          files: [file],
+          allowedMentions: { parse: [] },
+        });
       }
 
+      // penting: stop di sini, jangan lanjut ke button handler
       return;
     }
 
@@ -1072,7 +1105,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.message.edit({ embeds: [embed], components: [row], allowedMentions: { parse: [] } });
       }
 
-      // ✅ SORTING ROLL: kalau belum punya ID Card => kasih pesan, STOP
+      // ✅ SORTING ROLL: kalau belum punya ID Card => cuma kasih pesan (no modal/ritual)
       if (id === "sorting:roll") {
         const lightRoleId = requireEnv("LIGHT_ROLE_ID");
         const darkRoleId = requireEnv("DARK_ROLE_ID");
@@ -1098,7 +1131,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!idData) {
           const mention = idcardChannelId ? `<#${idcardChannelId}>` : "channel ID Card";
           return interaction.reply({
-            content: `🔒 Kamu belum punya **Valerie ID Card**.\nSilahkan buat dulu di ${mention} dengan command **/idcard**.\n\nSetelah itu balik lagi dan klik **Mulai Ritual**.`,
+            content: `⚠️ Kamu belum buat **Valerie ID Card**.\nSilahkan buat dulu di ${mention} dengan command **/idcard**.\n\nSetelah itu balik lagi dan klik **Mulai Ritual**.`,
             ephemeral: true,
           });
         }
