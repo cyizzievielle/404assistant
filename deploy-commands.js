@@ -1,59 +1,60 @@
+/**
+ * deploy-commands.js
+ * node deploy-commands.js
+ *
+ * npm i discord.js dotenv
+ * .env wajib:
+ * DISCORD_TOKEN=xxxxx
+ * CLIENT_ID=xxxxx
+ * GUILD_ID=xxxxx
+ */
+
 require("dotenv").config();
-const { REST, Routes } = require("discord.js");
+const { REST, Routes, SlashCommandBuilder } = require("discord.js");
 
 const commands = [
-  { name: "ping", description: "Cek latency bot" },
-  { name: "halo", description: "Sapa bot" },
-  { name: "about", description: "Info bot" },
+  new SlashCommandBuilder().setName("ping").setDescription("cek ping bot"),
+  new SlashCommandBuilder().setName("halo").setDescription("sapa bot"),
+  new SlashCommandBuilder().setName("about").setDescription("info bot"),
 
-  {
-    name: "userinfo",
-    description: "Lihat info user",
-    options: [
-      { name: "user", description: "Pilih user (opsional)", type: 6, required: false }, // USER
-    ],
-  },
+  new SlashCommandBuilder()
+    .setName("userinfo")
+    .setDescription("lihat info user")
+    .addUserOption((o) => o.setName("user").setDescription("pilih user").setRequired(false)),
 
-  {
-    name: "avatar",
-    description: "Lihat avatar user",
-    options: [
-      { name: "user", description: "Pilih user (opsional)", type: 6, required: false }, // USER
-    ],
-  },
+  new SlashCommandBuilder()
+    .setName("avatar")
+    .setDescription("lihat avatar user")
+    .addUserOption((o) => o.setName("user").setDescription("pilih user").setRequired(false)),
 
-  { name: "serverinfo", description: "Lihat info server" },
-  { name: "menfesspanel", description: "Kirim panel menfess ke channel menfess (Admin only)" },
-  { name: "idcard", description: "Buka panel pembuatan HOV Identity Card" },
+  new SlashCommandBuilder()
+    .setName("afk")
+    .setDescription("set status afk")
+    .addStringOption((o) => o.setName("reason").setDescription("alasan AFK").setRequired(false)),
 
-  {
-    name: "afk",
-    description: "Set status AFK kamu",
-    options: [{ name: "reason", description: "Alasan AFK (opsional)", type: 3, required: false }], // STRING
-  },
+  new SlashCommandBuilder().setName("registry").setDescription("lihat daftar warga terdaftar ID Card"),
+  new SlashCommandBuilder().setName("serverinfo").setDescription("info server"),
+  new SlashCommandBuilder().setName("menfesspanel").setDescription("kirim panel menfess (admin only)"),
+  new SlashCommandBuilder().setName("idcard").setDescription("buat / update HOV identity card"),
+  new SlashCommandBuilder().setName("sortingpanel").setDescription("kirim panel Arcane Sorting (admin only)"),
 
-  { name: "registry", description: "Lihat daftar warga yang sudah punya HOV ID Card" },
-];
+  // ✅ baru
+  new SlashCommandBuilder().setName("myhouse").setDescription("ambil Valerie House Card kamu"),
+].map((c) => c.toJSON());
 
-async function main() {
-  const token = process.env.DISCORD_TOKEN;
-  const clientId = process.env.CLIENT_ID;
-  const guildId = process.env.GUILD_ID;
+const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
-  if (!token || !clientId || !guildId) {
-    console.error("ENV kurang. Pastikan DISCORD_TOKEN, CLIENT_ID, GUILD_ID ada di .env");
-    process.exit(1);
-  }
-
-  const rest = new REST({ version: "10" }).setToken(token);
-
+(async () => {
   try {
-    console.log("Deploying guild commands...");
+    const clientId = process.env.CLIENT_ID;
+    const guildId = process.env.GUILD_ID;
+
+    if (!clientId || !guildId) throw new Error("CLIENT_ID / GUILD_ID belum ada di .env");
+
+    console.log("Deploying slash commands...");
     await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
-    console.log("✅ Done deploy guild commands!");
+    console.log("✅ Done deploy commands.");
   } catch (err) {
     console.error(err);
   }
-}
-
-main();
+})();
