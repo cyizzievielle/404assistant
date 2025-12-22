@@ -10,3 +10,11 @@ node_modules/
 
 # logs
 *.log
+
+.env
+*_db.json
+afk_db.json
+menfess_db.json
+sorting_db.json
+idcard_db.json
+node_modules
