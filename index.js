@@ -1,30 +1,32 @@
 /**
- * index.js — HOV Assistant (FULL FIX - COPY PASTE)
- * (Welcome + Menfess + HOV Identity Card + Registry + AFK + Avatar + Sorting (IDCard-required) + HouseCard + /myhouse)
- * discord.js v14
- * npm i discord.js dotenv canvas
+ * index.js — HOV Assistant (SQLite FINAL + PREFIX)
+ * discord.js v14 + @napi-rs/canvas
  *
- * .env wajib:
- * DISCORD_TOKEN=xxxxx
- * GENERAL_CHANNEL_ID=xxxxx
- * MENFESS_CHANNEL_ID=xxxxx
- * CLIENT_ID=xxxxx
- * GUILD_ID=xxxxx
+ * DB Engine:
+ * - Prefer: better-sqlite3 (sync, fast)  -> optional
+ * - Fallback: sqlite3 (async, stable)    -> recommended on many Pterodactyl images
  *
- * optional:
- * MENFESS_COOLDOWN_SEC=60
+ * Features:
+ * - Welcome message
+ * - AFK system (slash + prefix)
+ * - ID Card (canvas) — FONT FIX LINUX (InterReg/InterBold + DejaVu fallback)
+ * - Arcane Sorting (LOCK 1x + roles + House Card post)
+ * - Sorting "lebih natural": BAG SYSTEM (mis: 20 draw berisi 10 light + 10 dark, diacak, persist)
+ * - Registry pagination
+ * - Menfess (anonymous public label) + Admin Log channel
+ * - Prefix commands: cavatar, cuserinfo, cserverinfo, cafk, cping, chalp/chalo
+ * - Owner-only lock: /menfesspanel /sortingpanel /idcard + prefix versi panel & idcard
  *
- * Sorting + HouseCard:
- * LIGHT_ROLE_ID=xxxxx
- * DARK_ROLE_ID=xxxxx
- * SORTING_CHANNEL_ID=xxxxx
- * HOUSECARD_CHANNEL_ID=xxxxx
- * IDCARD_CHANNEL_ID=xxxxx
+ * Install (recommended for Pterodactyl):
+ *   yarn add discord.js dotenv sqlite3 @napi-rs/canvas
+ * Optional:
+ *   yarn add better-sqlite3
  */
 
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const {
   Client,
@@ -40,30 +42,359 @@ const {
   TextInputBuilder,
   TextInputStyle,
   AttachmentBuilder,
-  InteractionResponseFlags,
+  MessageFlags,
+  StringSelectMenuBuilder,
 } = require("discord.js");
 
-const { createCanvas, loadImage, registerFont } = require("canvas");
+
+const { createCanvas, loadImage, GlobalFonts } = require("@napi-rs/canvas");
 
 // ===================== CONFIG =====================
-const BRAND_NAME = "HOV Assistant";
-const ID_CARD_TITLE = "HOV IDENTITY CARD";
+const BRAND_NAME = "Mystral Assistant";
+const ID_CARD_TITLE = "MYSTRAL IDENTITY CARD";
 const EMBED_COLOR = 0x77d0d7;
 
-// Font (optional)
-const FONT_REG = path.join(__dirname, "assets", "fonts", "Inter-Regular.ttf");
-const FONT_BOLD = path.join(__dirname, "assets", "fonts", "Inter-Bold.ttf");
+const PREFIX = process.env.PREFIX || "c";
+
+// OWNER LOCK (HARUS diisi)
+const BOT_OWNER_ID = process.env.BOT_OWNER_ID || "776022128092774410";
+
+// ===================== SELF ROLES (ADD-ON) =====================
+const SELFROLES = require("./selfroles.roles.js");
+
+const SELF_AGE_IDS_RAW = SELFROLES.age.map((x) => x.value);
+const SELF_STATUS_IDS_RAW = SELFROLES.status.map((x) => x.value);
+const SELF_REGION_IDS_RAW = (SELFROLES.region || []).map((x) => x.value);
+const SELF_PING_IDS_RAW = (SELFROLES.ping || []).map((x) => x.value);
+
+
+// mapping interest per menu (biar update 1 kategori gak ngehapus kategori lain)
+const INTEREST_MENU_MAP = {
+  "self:int_gaming": SELFROLES.interest.gaming || [],
+  "self:int_ent": SELFROLES.interest.entertainment || [],
+  "self:int_creative": SELFROLES.interest.creative || [],
+};
+
+const ALL_INTEREST_IDS = Object.values(INTEREST_MENU_MAP)
+  .flat()
+  .map((x) => x.value);
+
+// === SAFETY: kalau ada role ID nyasar/duplikat lintas kategori, jangan sampai kehapus ===
+const SET_AGE = new Set(SELF_AGE_IDS_RAW);
+const SET_STATUS = new Set(SELF_STATUS_IDS_RAW);
+const SET_INTEREST = new Set(ALL_INTEREST_IDS);
+const SET_REGION = new Set(SELF_REGION_IDS_RAW);
+const SET_PING = new Set(SELF_PING_IDS_RAW);
+const SELF_STATUS_IDS = SELF_STATUS_IDS_RAW.filter(
+
+  (id) => !SET_AGE.has(id) && !SET_INTEREST.has(id) && !SET_REGION.has(id) && !SET_PING.has(id)
+);
+
+const SELF_AGE_IDS = SELF_AGE_IDS_RAW.filter(
+  (id) => !SET_STATUS.has(id) && !SET_INTEREST.has(id) && !SET_REGION.has(id) && !SET_PING.has(id)
+);
+
+// ✅ region remover (1 role only)
+const SELF_REGION_IDS = SELF_REGION_IDS_RAW.filter(
+  (id) => !SET_AGE.has(id) && !SET_STATUS.has(id) && !SET_INTEREST.has(id) && !SET_PING.has(id)
+);
+
+// ✅ ping remover (multi)
+const SELF_PING_IDS = SELF_PING_IDS_RAW.filter(
+  (id) => !SET_AGE.has(id) && !SET_STATUS.has(id) && !SET_INTEREST.has(id) && !SET_REGION.has(id)
+);
+
+function buildSelfSelect(customId, placeholder, options, maxValues) {
+  return new StringSelectMenuBuilder()
+    .setCustomId(customId)
+    .setPlaceholder(placeholder)
+    .addOptions(options.map((o) => ({ label: o.label, value: o.value })))
+    .setMinValues(0) // allow empty to remove
+    .setMaxValues(Math.min(Number(maxValues || 1), 25));
+}
+
+function selfrolesPanelEmbeds() {
+  const e1 = new EmbedBuilder()
+    .setTitle("🎓 AGE / GENERATION")
+    .setColor(EMBED_COLOR)
+    .setDescription(
+      [
+        "Setiap generasi memiliki cerita dan sudut pandangnya sendiri.",
+        "",
+        "Pilih **1 Age / Generation** yang paling menggambarkan dirimu.",
+        "Pilihan ini dapat diperbarui kapan saja.",
+      ].join("\n")
+    )
+    .setFooter({ text: "Mystral Academy • Identity Registry" });
+
+  const e2 = new EmbedBuilder()
+    .setTitle("🎯 INTEREST / HOBBY")
+    .setColor(EMBED_COLOR)
+    .setDescription(
+      [
+        "Minat membentuk cara kita berinteraksi dan berbagi cerita.",
+        "",
+        "Pilih bebas sesuai ketertarikanmu lewat dropdown di bawah.",
+        "Kamu dapat memilih **lebih dari satu** interest (tiap dropdown bisa multi).",
+        "",
+        "📌 **Gaming** — game yang kamu mainkan / komunitas yang kamu ikuti.",
+        "🎬 **Entertainment** — tontonan & musik yang kamu nikmati.",
+        "🎨 **Creative** — karya, skill, dan gaya hidup yang kamu sukai.",
+      ].join("\n")
+    )
+    .setFooter({ text: "Mystral Academy • Social Affinity" });
+
+  const e3 = new EmbedBuilder()
+    .setTitle("💖 STATUS")
+    .setColor(EMBED_COLOR)
+    .setDescription(
+      [
+        "Status mencerminkan keadaan yang ingin kamu tampilkan.",
+        "",
+        "Pilih **1 Status**, atau kosongkan untuk menghapus.",
+      ].join("\n")
+    )
+    .setFooter({ text: "Mystral Academy • Personal State" });
+
+  const eRegion = new EmbedBuilder()
+    .setTitle("🗺️ REGION")
+    .setColor(EMBED_COLOR)
+    .setDescription(
+      [
+        "Setiap wilayah memiliki cerita, budaya, dan warna tersendiri.",
+        "",
+        "Pilih **1 Region** yang paling mewakili tempatmu",
+        "atau kosongkan untuk menghapus pilihan.",
+      ].join("\n")
+    )
+    .setFooter({ text: "Mystral Academy • Region" });
+
+  const ePing = new EmbedBuilder()
+    .setTitle("🔔 PING ROLES")
+    .setColor(EMBED_COLOR)
+    .setDescription(
+      [
+        "Tidak semua kabar perlu sampai ke semua orang.",
+        "",
+        "Pilih role ping untuk menerima notifikasi yang kamu inginkan.",
+        "Kamu dapat memilih **lebih dari satu** role Ping.",
+      ].join("\n")
+    )
+    .setFooter({ text: "Mystral Academy • Ping Opt-in" });
+
+// return semua embed sekaligus
+  return [e1, e2, e3, eRegion, ePing];
+}
+
+//============== FONT (ULTRA FIX LINUX) =====================
+const FONT_CANDIDATES = [
+  {
+    reg: path.join(__dirname, "assets", "fonts", "Inter-Regular.ttf"),
+    bold: path.join(__dirname, "assets", "fonts", "Inter-Bold.ttf"),
+    label: "__dirname/assets/fonts",
+  },
+  {
+    reg: path.join(process.cwd(), "assets", "fonts", "Inter-Regular.ttf"),
+    bold: path.join(process.cwd(), "assets", "fonts", "Inter-Bold.ttf"),
+    label: "cwd/assets/fonts",
+  },
+  {
+    reg: "/home/container/assets/fonts/Inter-Regular.ttf",
+    bold: "/home/container/assets/fonts/Inter-Bold.ttf",
+    label: "/home/container/assets/fonts",
+  },
+];
+
+let FONT_FAMILY_REG = "DejaVu Sans";
+let FONT_FAMILY_BOLD = "DejaVu Sans";
 
 (function registerFontsSafe() {
   try {
-    if (fs.existsSync(FONT_REG)) registerFont(FONT_REG, { family: "Inter", weight: "normal" });
-    if (fs.existsSync(FONT_BOLD)) registerFont(FONT_BOLD, { family: "Inter", weight: "bold" });
-    console.log("[FONT] Loaded Inter fonts.");
+    console.log("[FONT] __dirname:", __dirname);
+    console.log("[FONT] cwd:", process.cwd());
+
+    let picked = null;
+
+    for (const c of FONT_CANDIDATES) {
+      const regOk = fs.existsSync(c.reg);
+      const boldOk = fs.existsSync(c.bold);
+      console.log(`[FONT] try ${c.label}`, { reg: c.reg, regOk, bold: c.bold, boldOk });
+      if (regOk || boldOk) {
+        picked = c;
+        break;
+      }
+    }
+
+    if (!picked) {
+      console.log("[FONT] ❌ Inter not found. Using fallback:", { FONT_FAMILY_REG, FONT_FAMILY_BOLD });
+      return;
+    }
+
+    if (fs.existsSync(picked.reg)) {
+      GlobalFonts.registerFromPath(picked.reg, "InterReg");
+      FONT_FAMILY_REG = "InterReg";
+    }
+    if (fs.existsSync(picked.bold)) {
+      GlobalFonts.registerFromPath(picked.bold, "InterBold");
+      FONT_FAMILY_BOLD = "InterBold";
+    }
+
+    const famNames = (GlobalFonts.families || [])
+      .map((f) => (typeof f === "string" ? f : f?.family))
+      .filter(Boolean);
+
+console.log("[FONT] families count:", famNames.length);
+console.log("[FONT] has InterReg:", famNames.includes("InterReg"));
+console.log("[FONT] has InterBold:", famNames.includes("InterBold"));
+
+
+    if (!famNames.includes("InterReg")) FONT_FAMILY_REG = "DejaVu Sans";
+    if (!famNames.includes("InterBold")) FONT_FAMILY_BOLD = "DejaVu Sans";
+
+    console.log("[FONT] ✅ Using:", { FONT_FAMILY_REG, FONT_FAMILY_BOLD });
   } catch (e) {
-    console.warn("[FONT] Failed to register fonts, fallback to system fonts.", e?.message || e);
+    console.warn("[FONT] register failed:", e?.message || e);
   }
 })();
 
+function setFont(ctx, weight, sizePx) {
+  const fam = weight === "bold" ? FONT_FAMILY_BOLD : FONT_FAMILY_REG;
+  ctx.font = `${weight} ${sizePx}px "${fam}"`;
+}
+
+// ===================== ENV =====================
+function requireEnv(name) {
+  const v = process.env[name];
+  return v && String(v).trim().length ? String(v).trim() : null;
+}
+
+function isBotOwner(userId) {
+  return String(userId) === String(BOT_OWNER_ID);
+}
+
+const SQLITE_PATH = requireEnv("SQLITE_PATH") || "./data/hovassistant_v2.db";
+const dir = path.dirname(SQLITE_PATH);
+if (dir && dir !== "." && dir !== "/") fs.mkdirSync(dir, { recursive: true });
+
+// ===================== DB ENGINE AUTO =====================
+let DB_ENGINE = null;
+
+// Try better-sqlite3 first
+let BetterSqlite = null;
+try {
+  BetterSqlite = require("better-sqlite3");
+  DB_ENGINE = "better-sqlite3";
+} catch {}
+
+// fallback sqlite3
+let sqlite3 = null;
+if (!DB_ENGINE) {
+  try {
+    sqlite3 = require("sqlite3").verbose();
+    DB_ENGINE = "sqlite3";
+  } catch {}
+}
+
+if (!DB_ENGINE) {
+  console.error("❌ Tidak ada DB engine terpasang. Install salah satu:");
+  console.error("   yarn add sqlite3");
+  console.error("   (optional) yarn add better-sqlite3");
+  process.exit(1);
+}
+
+// Wrapper interface
+let db = null;
+let dbGet = null;
+let dbAll = null;
+let dbRun = null;
+let dbExec = null;
+let dbTransaction = null;
+
+function openDb() {
+  if (DB_ENGINE === "better-sqlite3") {
+    db = new BetterSqlite(SQLITE_PATH);
+
+    db.pragma("journal_mode = WAL");
+    db.pragma("synchronous = NORMAL");
+    db.pragma("foreign_keys = ON");
+
+    dbGet = (sql, params = []) => db.prepare(sql).get(params);
+    dbAll = (sql, params = []) => db.prepare(sql).all(params);
+    dbRun = (sql, params = []) => db.prepare(sql).run(params);
+    dbExec = (sql) => db.exec(sql);
+
+    dbTransaction = (fn) => {
+      const tx = db.transaction(fn);
+      return (...args) => tx(...args);
+    };
+
+    console.log("[DB] Engine:", DB_ENGINE);
+    return;
+  }
+  
+  // sqlite3 (async)
+  db = new sqlite3.Database(SQLITE_PATH);
+
+  dbExec = (sql) =>
+    new Promise((resolve, reject) => {
+      db.exec(sql, (err) => (err ? reject(err) : resolve()));
+    });
+
+  dbRun = (sql, params = []) =>
+    new Promise((resolve, reject) => {
+      db.run(sql, params, function (err) {
+        if (err) return reject(err);
+        resolve({ changes: this.changes ?? 0, lastID: this.lastID });
+      });
+    });
+
+  dbGet = (sql, params = []) =>
+    new Promise((resolve, reject) => {
+      db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
+    });
+
+  dbAll = (sql, params = []) =>
+    new Promise((resolve, reject) => {
+      db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+    });
+
+  // transaction emulation
+  dbTransaction = (fn) => {
+    return async (...args) => {
+      await dbRun("BEGIN IMMEDIATE");
+      try {
+        const res = await fn(...args);
+        await dbRun("COMMIT");
+        return res;
+      } catch (e) {
+        await dbRun("ROLLBACK").catch(() => {});
+        throw e;
+      }
+    };
+  };
+
+  console.log("[DB] Engine:", DB_ENGINE);
+}
+
+// ===================== DB SAFE HELPERS (works for better-sqlite3 + sqlite3) =====================
+async function safeGet(sql, params = []) {
+  try { return await dbGet(sql, params); } catch { return null; }
+}
+
+async function safeAll(sql, params = []) {
+  try { return await dbAll(sql, params); } catch { return []; }
+}
+
+async function safeRun(sql, params = []) {
+  try { return await dbRun(sql, params); } catch { return { changes: 0, lastID: null }; }
+}
+
+async function safeExec(sql) {
+  try { return await dbExec(sql); } catch { return null; }
+}
+
+
+// ===================== DISCORD CLIENT =====================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -81,140 +412,423 @@ client.on("error", (err) => console.error("[client error]", err));
 // ===================== UTILS =====================
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function safeText(s, max = 32) {
-  return String(s || "")
-    .replace(/[\r\n\t]/g, " ")
-    .trim()
-    .slice(0, max);
-}
 
-function requireEnv(name) {
-  const v = process.env[name];
-  return v && String(v).trim().length ? String(v).trim() : null;
-}
+      // ===================== VOICE STATS (FIX) =====================
+      async function updateStatsChannels(guild) {
+        try {
+          if (!guild) return;
 
-/** Reply helper biar ga kena 40060 */
-async function safeReply(interaction, payload) {
-  try {
-    if (interaction.deferred) return await interaction.editReply(payload);
-    if (interaction.replied) return await interaction.followUp(payload);
-    return await interaction.reply(payload);
-  } catch (e) {
-    console.error("[safeReply]", e?.message || e);
-  }
-}
-async function safeDeferReply(interaction, opts) {
-  try {
-    if (interaction.deferred || interaction.replied) return;
-    return await interaction.deferReply(opts);
-  } catch (e) {
-    console.error("[safeDeferReply]", e?.message || e);
-  }
-}
-async function safeDeferUpdate(interaction) {
-  try {
-    if (interaction.deferred || interaction.replied) return;
-    return await interaction.deferUpdate();
-  } catch (e) {
-    console.error("[safeDeferUpdate]", e?.message || e);
-  }
-}
-async function safeShowModal(interaction, modal) {
-  try {
-    if (interaction.deferred || interaction.replied) return; // udah ack
-    return await interaction.showModal(modal);
-  } catch (e) {
-    console.error("[safeShowModal]", e?.message || e);
-  }
-}
+          const categoryId = requireEnv("STATS_CATEGORY_ID");
+          if (!categoryId) return;
 
-/**
- * FIX: bikin fetch channel lebih jelas & bisa kasih alasan error
- */
-async function getTextChannelOrExplain(guild, id) {
-  if (!guild || !id) return { ok: false, reason: "missing_guild_or_id" };
+          const category = await guild.channels.fetch(categoryId).catch(() => null);
+          if (!category) return;
 
-  try {
-    const ch = await guild.channels.fetch(id);
-    if (!ch) return { ok: false, reason: "not_found" };
-    if (!ch.isTextBased?.()) return { ok: false, reason: "not_text_based", found: ch };
-    return { ok: true, channel: ch };
-  } catch (e) {
-    return { ok: false, reason: "fetch_failed", code: e?.code, message: e?.message };
-  }
-}
+          // ✅ v14: ambil semua channel lalu filter yang parentId-nya categoryId
+          const allChannels = await guild.channels.fetch().catch(() => null);
+          if (!allChannels) return;
 
-/**
- * FIX: cek role beneran ada (biar gak “padahal env udah diisi”)
- */
-async function getRoleOrExplain(guild, roleId) {
-  if (!guild || !roleId) return { ok: false, reason: "missing_guild_or_id" };
-  try {
-    const role = await guild.roles.fetch(roleId);
-    if (!role) return { ok: false, reason: "role_not_found" };
-    return { ok: true, role };
-  } catch (e) {
-    return { ok: false, reason: "fetch_failed", code: e?.code, message: e?.message };
-  }
-}
+          const voiceInCategory = allChannels.filter(
+            (ch) => ch?.isVoiceBased?.() && ch.parentId === categoryId
+          );
 
-function explainChannelError(res) {
-  if (res.reason === "missing_guild_or_id") return "Guild/ID kosong atau dipakai bukan di server.";
-  if (res.reason === "not_text_based") return "ID yang kamu isi bukan text channel (mungkin category/voice/thread).";
-  if (res.code === 10003) return "Unknown Channel: ID salah / channel sudah dihapus lalu dibuat ulang.";
-  if (res.code === 50001) return "Missing Access: bot tidak punya akses (View Channel) ke channel itu.";
-  if (res.code === 50013) return "Missing Permissions: bot tidak punya izin yang cukup di channel itu.";
-  return `Gagal fetch channel (${res.code || "?"}): ${res.message || "unknown"}`;
-}
 
-function explainRoleError(res) {
-  if (res.reason === "missing_guild_or_id") return "Role ID kosong atau dipakai bukan di server.";
-  if (res.reason === "role_not_found") return "Role tidak ditemukan (ID salah / role dihapus lalu dibuat ulang).";
-  if (res.code === 50001) return "Missing Access: bot tidak punya akses untuk fetch role (jarang, tapi bisa).";
-  if (res.code === 50013) return "Missing Permissions: bot tidak punya izin yang cukup.";
-  return `Gagal fetch role (${res.code || "?"}): ${res.message || "unknown"}`;
-}
+          if (!voiceInCategory.size) return;
+
+          // ✅ member counts (lebih hemat: pakai cache kalau ada, kalau nggak fetch sekali)
+          let members;
+          try {
+            members = guild.members.cache?.size ? guild.members.cache : await guild.members.fetch();
+          } catch {
+            members = null;
+          }
+          if (!members) return;
+
+          const total = guild.memberCount ?? members.size;
+          const bots = members.filter((m) => m.user?.bot).size;
+          const humans = total - bots;
+          const boosts = guild.premiumSubscriptionCount || 0;
+
+          // Nama final yang mau dipakai
+          const names = {
+            all: `🔊 All Members: ${total}`,
+            members: `👤 Members: ${humans}`,
+            bots: `🤖 Bots: ${bots}`,
+            boosts: `💎 Boosts: ${boosts}`,
+          };
+
+          // ✅ Deteksi target channel berdasarkan AWAL nama (prefix), bukan includes
+          //   Biar "All Members" nggak ketembak "members".
+          const detectKey = (name) => {
+            const n = String(name || "").toLowerCase().trim();
+
+            // buang emoji & spasi depan
+            const clean = n.replace(/^[^\w]+/g, "").trim(); // hapus emoji/simbol di awal
+            // contoh clean: "all members: 341"
+
+            if (clean.startsWith("all")) return "all";
+            if (clean.startsWith("members")) return "members";
+            if (clean.startsWith("bots")) return "bots";
+            if (clean.startsWith("boosts")) return "boosts";
+
+            // fallback tambahan (kalau kamu pakai label lain)
+            if (clean.startsWith("all members")) return "all";
+            return null;
+          };
+
+          for (const ch of voiceInCategory.values()) {
+            const key = detectKey(ch.name);
+            if (!key) continue;
+
+            const newName = names[key];
+            if (newName && ch.name !== newName) {
+              await ch.setName(newName).catch(() => {});
+            }
+          }
+        } catch (e) {
+          console.error("[STATS] update failed:", e?.message || e);
+        }
+      }
+
+   // ===================== PROFILE (EMBED + BUTTONS) =====================
+        async function buildProfileEmbed({ guild, user, member }) {
+          // fetch full user untuk banner
+          const userFull = await client.users.fetch(user.id, { force: true }).catch(() => null);
+          const bannerUrl = userFull?.bannerURL?.({ extension: "png", size: 1024 }) || null;
+
+          // DB data
+          const idData = await getIdCard(user.id).catch(() => null);
+          const sorted = await getSortedUser(user.id).catch(() => null);
+          const afk = await getAfk(user.id).catch(() => null);
+
+          // timeline
+          const createdUnix = Math.floor((user.createdTimestamp || Date.now()) / 1000);
+          const joinedUnix = member?.joinedTimestamp ? Math.floor(member.joinedTimestamp / 1000) : null;
+
+          // roles
+          const roleMentions = member
+            ? member.roles.cache
+                .filter((r) => r.id !== guild.id)
+                .sort((a, b) => b.position - a.position)
+                .map((r) => r.toString())
+            : [];
+
+          const topRole =
+            member?.roles.cache
+              .filter((r) => r.id !== guild.id)
+              .sort((a, b) => b.position - a.position)
+              .first() || null;
+
+          const displayName = member?.displayName || user.username;
+          const nickname = member?.nickname || "—";
+
+          const afkText = afk
+            ? `🕯️ **AFK:** ${afk.reason}\nSejak: <t:${Math.floor((Number(afk.since) || Date.now()) / 1000)}:R>`
+            : "—";
+
+          const idText = idData
+            ? [
+                `**No ID:** \`${idData.number || "—"}\``,
+                `**Nama:** ${idData.name || "—"}`,
+                `**Gender:** ${idData.gender || "—"}`,
+                `**Domisili:** ${idData.domisili || "—"}`,
+                `**Hobi:** ${idData.hobi || "—"}`,
+                `**Status:** ${idData.status || "—"}`,
+                `**Theme:** ${(idData.theme || "light") === "dark" ? "dark" : "light"}`,
+              ].join("\n")
+            : "Belum punya ID Card.";
+
+          const sortText = sorted?.choice
+            ? `✅ **Student:** ${sorted.choice === "dark" ? "<:dark:1459543141609771101> Dark" : "<:light:1459543076736336004> Light"}\nSejak: <t:${Math.floor((Number(sorted.at) || Date.now()) / 1000)}:R>`
+            : "Belum melakukan Sorting.";
+
+          const embed = new EmbedBuilder()
+            .setTitle(`🧿 Mystral Profile — ${displayName}`)
+            .setColor(EMBED_COLOR)
+            .setThumbnail(user.displayAvatarURL({ extension: "png", size: 256 }))
+            .setDescription(`**Mention:** <@${user.id}>`)
+            .addFields(
+              {
+                name: "🪪 Identity",
+                value: [
+                  `**Tag:** ${user.tag}`,
+                  `**User ID:** \`${user.id}\``,
+                  `**Nickname:** ${nickname === "—" ? "—" : `\`${nickname}\``}`,
+                ].join("\n"),
+                inline: true,
+              },
+              {
+                name: "🕰️ Timeline",
+                value: [
+                  `**Akun Dibuat:** <t:${createdUnix}:F>`,
+                  `**Join Server:** ${joinedUnix ? `<t:${joinedUnix}:F>` : "—"}`,
+                  `**Relative:** <t:${createdUnix}:R>${joinedUnix ? ` • <t:${joinedUnix}:R>` : ""}`,
+                ].join("\n"),
+                inline: true,
+              },
+              { name: "🕯️ AFK", value: afkText, inline: false },
+              { name: "🪪 ID Card", value: idText.length > 1024 ? idText.slice(0, 1020) + "…" : idText, inline: false },
+              { name: "🔮 Student Sorting", value: sortText, inline: true },
+              { name: "🏷️ Highest Role", value: topRole ? `${topRole} *(pos ${topRole.position})*` : "—", inline: true },
+              { name: "🎭 Roles", value: rolesWithPrefix(roleMentions, 12), inline: false }
+            )
+            .setFooter({ text: `${BRAND_NAME} • Student Registry` })
+            .setTimestamp();
+
+          if (bannerUrl) embed.setImage(bannerUrl);
+
+          return { embed, idData, sorted, afk };
+        }
+
+        function profileButtons({ hasIdCard, hasSorted, isAfk }) {
+          return new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId("profile:view_idcard")
+              .setLabel("Lihat ID Card")
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(!hasIdCard)
+              .setEmoji("🪪"),
+
+            new ButtonBuilder()
+              .setCustomId("profile:view_house")
+              .setLabel("Lihat House Card")
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(!hasIdCard || !hasSorted)
+              .setEmoji("🏰"),
+
+            new ButtonBuilder()
+              .setCustomId(isAfk ? "profile:afk_clear" : "profile:afk_set")
+              .setLabel(isAfk ? "Hapus AFK" : "Set AFK")
+              .setStyle(isAfk ? ButtonStyle.Danger : ButtonStyle.Primary)
+              .setEmoji(isAfk ? "🧹" : "🕯️")
+          );
+        }
+
+        function rolesWithPrefix(roleMentions, max = 12) {
+          // roleMentions: array string kayak "<@&id>"
+          const shown = roleMentions.slice(0, max);
+          const more = Math.max(0, roleMentions.length - shown.length);
+
+          // prefix numbering kecil
+          const nums = ["①","②","③","④","⑤","⑥","⑦","⑧","⑨","⑩","⑪","⑫","⑬","⑭","⑮"];
+
+          const lines = shown.map((r, i) => `${nums[i] || "•"} ${r}`);
+          if (more) lines.push(`…dan **${more}** role lain.`);
+          return lines.length ? lines.join("\n") : "—";
+        }
+
+        function buildProfileAfkModal(defaultReason = "") {
+          const modal = new ModalBuilder().setCustomId("profile:afk_submit").setTitle("🕯️ Set / Update AFK");
+
+          const reasonInput = new TextInputBuilder()
+            .setCustomId("reason")
+            .setLabel("Alasan AFK")
+            .setStyle(TextInputStyle.Short)
+            .setMaxLength(80)
+            .setRequired(true)
+            .setValue(String(defaultReason || "").slice(0, 80));
+
+          modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
+          return modal;
+        }
+
+        function safeText(s, max = 32) {
+          return String(s || "")
+            .replace(/[\r\n\t]/g, " ")
+            .trim()
+            .slice(0, max);
+        }
+
+        async function safeReply(interaction, payload) {
+          try {
+            if (interaction.deferred) return await interaction.editReply(payload);
+            if (interaction.replied) return await interaction.followUp(payload);
+            return await interaction.reply(payload);
+          } catch (e) {
+            console.error("[safeReply] failed:", e?.message || e);
+          }
+        }
+
+        async function safeDefer(interaction, ephemeral = true) {
+          try {
+            if (interaction.deferred || interaction.replied) return;
+            await interaction.deferReply(ephemeral ? { flags: MessageFlags.Ephemeral } : {});
+          } catch (e) {
+            console.error("[safeDefer] failed:", e?.message || e);
+          }
+        }
+
+        async function safeDeferUpdate(interaction) {
+          try {
+            if (interaction.deferred || interaction.replied) return;
+            await interaction.deferUpdate();
+          } catch (e) {
+            console.error("[safeDeferUpdate] failed:", e?.message || e);
+          }
+        }
+
+        async function getTextChannelOrNull(guild, id) {
+          if (!guild || !id) return null;
+          try {
+            const ch = await guild.channels.fetch(id);
+            if (!ch) return null;
+            if (!ch.isTextBased?.()) return null;
+            return ch;
+          } catch {
+            return null;
+          }
+        }
+
+        async function getRoleOrNull(guild, roleId) {
+          if (!guild || !roleId) return null;
+          try {
+            const role = await guild.roles.fetch(roleId);
+            return role || null;
+          } catch {
+            return null;
+          }
+        }
+
+        function genCardNumber(userId) {
+          const raw = `${userId}${Date.now()}`.replace(/\D/g, "");
+          return raw.slice(-16).padStart(16, "0");
+        }
+
+        function formatIdDate(ms) {
+          try {
+            return new Date(ms).toLocaleDateString("id-ID", {
+              day: "2-digit",
+              month: "long",
+              year: "numeric",
+            });
+          } catch {
+            return "—";
+          }
+        }
 
 // ===================== WELCOME =====================
 const WELCOME_MESSAGES = [
-  (m, g) => `✨ gerbang berpendar pelan… ${m} kini terdaftar di ${g}. selamat datang dan semoga betah. 🌙`,
-  (m, g) => `🔮 sebuah nama baru tertulis di arsip. selamat datang ${m} di ${g}. jangan ragu menyapa ya. ✨`,
-  (m, g) => `🕯️ cahaya lilin menyambut langkahmu, ${m}. selamat datang di ${g}. semoga harimu hangat. 🌿`,
-  (m, g) => `🌌 angin malam membawa kabar: ${m} tiba di ${g}. jelajahi realm ini dengan tenang. ✨`,
-  (m, g) => `🌙 takdir mempertemukan kita. selamat datang ${m} di ${g}. semoga menemukan teman dan cerita. 🔮`,
-  (m, g) => `✨ gerbang terbuka. ${m} masuk ke ${g}. baca aturan dulu, lalu mari bersenang-senang. 🕯️`,
-  (m, g) => `🪄 sihir kecil menyapa: halo ${m}! selamat datang di ${g}. semoga nyaman di sini. 🌙`,
-  (m, g) => `🌠 bintang mencatat kedatanganmu. ${m}, selamat datang di ${g}. ayo kenalan pelan-pelan. ✨`,
-  (m, g) => `🔮 aura baru terdeteksi… ${m} telah tiba di ${g}. semoga harimu penuh hal baik. 🌿`,
-  (m, g) => `🕯️ langkahmu resmi di realm ini, ${m}. selamat datang di ${g}. nikmati setiap percakapan. ✨`,
-  (m, g) => `🌌 pintu dimensi terbuka—${m} mendarat di ${g}. jangan sungkan untuk gabung obrolan. 🌙`,
-  (m, g) => `✨ halo ${m}! selamat datang di ${g}. kalau bingung mulai dari mana, ketik /halo ya. 🔮`,
-  (m, g) => `🌙 sebuah jiwa baru bergabung: ${m}. selamat datang di ${g}. semoga betah dan aman. 🕯️`,
-  (m, g) => `🔮 arsip diperbarui. ${m}, selamat datang di ${g}. semoga menemukan tempatmu di sini. ✨`,
-  (m, g) => `🌿 selamat datang ${m} di ${g}. di sini kita ngobrol santai, tapi tetap sopan ya. 🕯️`,
+  (m, g) => `✨ lonceng kristal berdentang lembut di menara akademi saat gerbang terbuka untukmu. ${m}, selamat datang di ${g}. di tempat ini, ilmu, percakapan, dan misteri dijaga bersama. jelajahi aula dengan rasa hormat, ikuti tatanan yang berlaku, dan biarkan perjalananmu berkembang dengan tenang. 🌙`,
+  (m, g) => `🔮 tinta arcane kembali mengalir di buku induk akademi, menuliskan satu nama baru: ${m}. selamat datang di ${g}. luangkan waktu untuk memahami aturan yang menjaga keseimbangan kami, agar setiap langkahmu selaras dengan suasana dan kebijaksanaan tempat ini. ✨`,
+  (m, g) => `🕯️ cahaya lilin menyala satu per satu di lorong batu tua saat kakimu melangkah masuk. ${m}, selamat datang di ${g}. semoga harimu hangat dan percakapanmu membawa kebaikan. ingatlah untuk menghormati sesama murid dan menaati tata tertib akademi. 🌿`,
+  (m, g) => `🌌 angin senja berbisik dari menara observatorium: seorang murid baru telah tiba. ${m}, selamat datang di ${g}. sebelum memulai petualanganmu, luangkan sejenak membaca aturan agar setiap interaksi tetap aman, nyaman, dan bermakna. ✨`,
+  (m, g) => `📜 arsip kuno kembali terbuka, menyambut satu nama yang kini tercatat di dalamnya. selamat datang ${m} di ${g}. akademi ini berdiri atas rasa saling menghormati, maka jagalah tutur kata dan patuhi ketentuan yang telah disepakati bersama. 🔮`,
+  (m, g) => `🜂 nyala api di aula utama bergetar pelan, menandai kedatanganmu. ${m}, selamat datang di ${g}. belajarlah dengan bebas, berdiskusilah dengan bijak, dan jangan lupa mengikuti aturan agar keseimbangan akademi tetap terjaga. 🌙`,
+  (m, g) => `🌙 bulan menggantung tenang di atas menara saat kau resmi diterima. ${m}, selamat datang di ${g}. kami mengundangmu untuk berpartisipasi dengan sopan, menghormati batasan, dan menaati tata tertib yang menjaga keharmonisan bersama. ✨`,
+  (m, g) => `🔔 bel akademi berbunyi lirih, seolah menyapa langkah barumu. ${m}, selamat datang di ${g}. sebelum menjelajah lebih jauh, pastikan kau memahami aturan dasar agar setiap ruang tetap menjadi tempat yang aman dan menyenangkan. 🕯️`,
+  (m, g) => `🕯️ cahaya hangat di ruang studi menyambut kehadiranmu. ${m}, kini kau bagian dari ${g}. gunakan ruang ini dengan bijaksana, hormati sesama, dan ikuti aturan yang ada agar semua dapat belajar dengan nyaman. 🌿`,
+  (m, g) => `🌌 bintang-bintang menjadi saksi langkah pertamamu di akademi. ${m}, selamat datang di ${g}. kebebasan berekspresi dihargai di sini, selama tetap selaras dengan aturan dan rasa hormat terhadap yang lain. ✨`,
+  (m, g) => `📖 sebuah halaman kosong terbuka di mejamu, menunggu kisah yang akan kau tulis. ${m}, selamat datang di ${g}. sebelum menorehkan ceritamu, luangkan waktu memahami tata tertib agar perjalananmu berjalan tanpa hambatan. 🔮`,
+  (m, g) => `🜄 gemericik air di taman arcane mengiringi langkahmu masuk. ${m}, selamat datang di ${g}. jaga ketenangan, hargai perbedaan, dan patuhi aturan agar suasana akademi tetap seimbang dan damai. 🌙`,
+  (m, g) => `✨ gema mantra penyambutan terdengar lembut di aula utama. ${m} kini resmi bergabung dengan ${g}. kami percaya setiap murid mampu menjaga sikap dan menaati aturan demi kenyamanan bersama. 🕯️`,
+  (m, g) => `🔮 para penjaga arsip menatap tenang saat satu nama baru dicatat. ${m}, selamat datang di ${g}. ikutilah ketentuan yang telah ditetapkan, karena di sanalah kebijaksanaan akademi dijaga. 🌌`,
+  (m, g) => `🌿 dedaunan di halaman dalam bergoyang pelan, menyambut kehadiranmu. ${m}, selamat datang di ${g}. nikmati perjalananmu, jalin percakapan yang baik, dan jangan lupa menaati aturan agar keharmonisan tetap terjaga. ✨`,
 ];
 
-// ===================== MENFESS DB =====================
-const menfessCooldown = new Map();
-const MENFESS_DB_PATH = path.join(__dirname, "menfess_db.json");
 
-function loadMenfessDB() {
+// ===================== INIT DB =====================
+async function initDb() {
+  await dbExec(`
+    CREATE TABLE IF NOT EXISTS menfess_posts (
+      id INTEGER PRIMARY KEY,
+      message_id TEXT,
+      channel_id TEXT,
+      created_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS menfess_anonmap (
+      user_id TEXT PRIMARY KEY,
+      anon_label TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sorting_users (
+      user_id TEXT PRIMARY KEY,
+      choice TEXT NOT NULL,
+      at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS idcard_users (
+      user_id TEXT PRIMARY KEY,
+      number TEXT,
+      name TEXT,
+      gender TEXT,
+      domisili TEXT,
+      hobi TEXT,
+      status TEXT,
+      theme TEXT,
+      created_at INTEGER,
+      updated_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS afk_users (
+      user_id TEXT PRIMARY KEY,
+      reason TEXT,
+      since INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS menfess_meta (
+      key TEXT PRIMARY KEY,
+      value INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS app_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+  `);
+}
+
+// ===================== META (TEXT) =====================
+async function getMetaText(key) {
+  const r = await safeGet(`SELECT value FROM app_meta WHERE key=?`, [key]);
+  return r?.value ?? null;
+}
+
+async function setMetaText(key, value) {
+  await dbRun(
+    `INSERT INTO app_meta (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+    [key, String(value)]
+  );
+}
+// ===================== MENFESS COUNTER =====================
+async function ensureMenfessCounterStart() {
+  const MIN_LAST_ID = 106;
+
+  let row = null;
+  let maxRow = { m: 0 };
+
   try {
-    return JSON.parse(fs.readFileSync(MENFESS_DB_PATH, "utf8"));
+    row = await dbGet(`SELECT value FROM menfess_meta WHERE key='menfess_last_id'`);
   } catch {
-    return { lastId: 0, posts: {}, anonMap: {} };
+    row = null;
+  }
+
+  try {
+    maxRow = await dbGet(`SELECT COALESCE(MAX(id), 0) AS m FROM menfess_posts`);
+  } catch {
+    maxRow = { m: 0 };
+  }
+
+  const maxId = Number(maxRow?.m || 0);
+
+  if (!row) {
+    const startLastId = Math.max(MIN_LAST_ID, maxId);
+    await dbRun(`INSERT INTO menfess_meta (key, value) VALUES ('menfess_last_id', ?)`, [startLastId]);
+    return;
+  }
+
+  const cur = Number(row.value || 0);
+  const fixed = Math.max(cur, MIN_LAST_ID, maxId);
+  if (fixed !== cur) {
+    await dbRun(`UPDATE menfess_meta SET value=? WHERE key='menfess_last_id'`, [fixed]);
   }
 }
-function saveMenfessDB(db) {
-  fs.writeFileSync(MENFESS_DB_PATH, JSON.stringify(db, null, 2), "utf8");
-}
-function getAnonLabel(db, userId) {
-  if (!db.anonMap[userId]) {
-    const n = Object.keys(db.anonMap).length + 1;
-    db.anonMap[userId] = `Anon #${String(n).padStart(3, "0")}`;
-  }
-  return db.anonMap[userId];
-}
+
+
+// ===================== MENFESS =====================
+const menfessCooldown = new Map();
+
 function isBadAlias(alias) {
   if (/[<@#>]/.test(alias)) return true;
   const low = alias.toLowerCase();
@@ -222,77 +836,367 @@ function isBadAlias(alias) {
   return blocked.some((w) => low.includes(w));
 }
 
-// ===================== ID CARD DB =====================
-const IDCARD_DB_PATH = path.join(__dirname, "idcard_db.json");
+async function getAnonLabel(userId) {
+  const row = await safeGet("SELECT anon_label FROM menfess_anonmap WHERE user_id=?", [userId]);
+  if (row?.anon_label) return row.anon_label;
 
-function loadIdDB() {
+  const c = await safeGet("SELECT COUNT(*) AS n FROM menfess_anonmap");
+  const n = Number(c?.n || 0) + 1;
+
+  const label = `Anon #${String(n).padStart(3, "0")}`;
+
+  await safeRun(
+    `INSERT INTO menfess_anonmap (user_id, anon_label)
+     VALUES (?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET anon_label=excluded.anon_label`,
+    [userId, label]
+  );
+
+  return label;
+}
+
+async function insertMenfessPost({ id, messageId, channelId }) {
+  await dbRun(
+    `INSERT INTO menfess_posts (id, message_id, channel_id, created_at)
+     VALUES (?,?,?,?)`,
+    [id, messageId || null, channelId || null, Date.now()]
+  );
+  return id;
+}
+
+async function updateMenfessPostLink(id, { messageId, channelId }) {
+  await dbRun(`UPDATE menfess_posts SET message_id=?, channel_id=? WHERE id=?`, [messageId, channelId, Number(id)]);
+}
+
+async function getMenfessPostById(id) {
+  return (await safeGet(
+    `SELECT id, message_id, channel_id, created_at FROM menfess_posts WHERE id=?`,
+    [Number(id)]
+  )) || null;
+}
+
+async function sendMenfessLog(guild, payload) {
+  const logId = requireEnv("MENFESS_LOG_CHANNEL_ID");
+  if (!logId) return;
+  const logCh = await getTextChannelOrNull(guild, logId);
+  if (!logCh) return;
   try {
-    return JSON.parse(fs.readFileSync(IDCARD_DB_PATH, "utf8"));
-  } catch {
-    return { users: {} };
+    await logCh.send(payload);
+  } catch (e) {
+    console.error("[MENFESS LOG] failed:", e?.message || e);
   }
 }
-function saveIdDB(db) {
-  fs.writeFileSync(IDCARD_DB_PATH, JSON.stringify(db, null, 2), "utf8");
-}
-function genCardNumber(userId) {
-  const raw = `${userId}${Date.now()}`.replace(/\D/g, "");
-  return raw.slice(-16).padStart(16, "0");
+
+// ===================== TICKET HELPERS =====================
+function ticketIsStaff(member) {
+  const staffRoleId = requireEnv("TICKET_STAFF_ROLE_ID");
+  if (!staffRoleId) return false;
+  return Boolean(member?.roles?.cache?.has?.(staffRoleId));
 }
 
-// ===================== AFK DB =====================
-const AFK_DB_PATH = path.join(__dirname, "afk_db.json");
+async function getTicketLogChannel(guild) {
+  const logId = requireEnv("TICKET_LOG_CHANNEL_ID");
+  if (!logId) return null;
+  return await getTextChannelOrNull(guild, logId);
+}
 
-function loadAfkDB() {
-  try {
-    return JSON.parse(fs.readFileSync(AFK_DB_PATH, "utf8"));
-  } catch {
-    return { users: {} };
+function ticketMeta(type, userId) {
+  // simpan owner & type di topic biar persist
+  return `[TICKET:${type}] [OWNER:${userId}]`;
+}
+function getTicketOwnerIdFromTopic(topic) {
+  const m = String(topic || "").match(/\[OWNER:(\d{15,25})\]/);
+  return m ? m[1] : null;
+}
+function getTicketTypeFromTopic(topic) {
+  const m = String(topic || "").match(/\[TICKET:(complaint|report)\]/);
+  return m ? m[1] : null;
+}
+function getClaimedFromTopic(topic) {
+  const m = String(topic || "").match(/\[CLAIMED:(\d{15,25})\]/);
+  return m ? m[1] : null;
+}
+function setClaimedTopic(topic, staffId) {
+  const clean = String(topic || "").replace(/\s*\[CLAIMED:\d{15,25}\]\s*/g, "").trim();
+  return `${clean} [CLAIMED:${staffId}]`.trim();
+}
+
+async function buildTicketTranscript(channel) {
+  const limit = Number(process.env.TICKET_TRANSCRIPT_LIMIT || 300);
+
+  const all = [];
+  let before = undefined;
+
+  while (all.length < limit) {
+    const batch = await channel.messages.fetch({ limit: Math.min(100, limit - all.length), before }).catch(() => null);
+    if (!batch || batch.size === 0) break;
+
+    const arr = [...batch.values()];
+    all.push(...arr);
+    before = arr[arr.length - 1].id;
   }
+
+  all.sort((a, b) => (a.createdTimestamp || 0) - (b.createdTimestamp || 0));
+
+  const esc = (s) =>
+    String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+
+  const txt = all
+    .map((m) => {
+      const time = new Date(m.createdTimestamp || Date.now()).toLocaleString("id-ID");
+      const author = `${m.author?.tag || "Unknown"} (${m.author?.id || "—"})`;
+      const content = m.content || "";
+      const attach = m.attachments?.size ? ` [attachments: ${[...m.attachments.values()].map((x) => x.url).join(" ")}]` : "";
+      return `[${time}] ${author}: ${content}${attach}`;
+    })
+    .join("\n");
+
+  const htmlRows = all
+    .map((m) => {
+      const time = new Date(m.createdTimestamp || Date.now()).toLocaleString("id-ID");
+      const author = `${m.author?.tag || "Unknown"} (${m.author?.id || "—"})`;
+      const content = esc(m.content || "");
+      const attach = m.attachments?.size
+        ? `<div class="att">📎 ${[...m.attachments.values()]
+            .map((x) => `<a href="${esc(x.url)}">${esc(x.name || "file")}</a>`)
+            .join(" • ")}</div>`
+        : "";
+      return `<div class="msg">
+  <div class="meta"><span class="time">${esc(time)}</span> • <span class="author">${esc(author)}</span></div>
+  <div class="content">${content ? content.replace(/\n/g, "<br/>") : "<i>(no content)</i>"}</div>
+  ${attach}
+</div>`;
+    })
+    .join("\n");
+
+  const html = `<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Ticket Transcript</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; background:#0b0716; color:#f4eeff; padding:24px;}
+  .wrap{max-width:920px; margin:0 auto;}
+  .head{padding:16px 18px; border:1px solid rgba(255,255,255,.12); border-radius:14px; background:rgba(20,16,42,.55); margin-bottom:14px;}
+  .msg{padding:12px 14px; border:1px solid rgba(255,255,255,.10); border-radius:14px; background:rgba(10,8,22,.62); margin:10px 0;}
+  .meta{opacity:.85; font-size:12px; margin-bottom:6px}
+  .content{font-size:14px; line-height:1.45}
+  .att{margin-top:8px; font-size:12px; opacity:.9}
+  a{color:#a78bfa; text-decoration:none}
+  a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="head">
+      <div style="font-weight:800; font-size:16px">Mystral Academy — Ticket Transcript</div>
+      <div style="opacity:.85; font-size:12px">Channel: ${esc(channel.name)} • Exported: ${esc(new Date().toLocaleString("id-ID"))}</div>
+    </div>
+    ${htmlRows || "<i>(no messages)</i>"}
+  </div>
+</body>
+</html>`;
+
+  return {
+    count: all.length,
+    txtBuffer: Buffer.from(txt || "(no messages)", "utf8"),
+    htmlBuffer: Buffer.from(html, "utf8"),
+  };
 }
-function saveAfkDB(db) {
-  fs.writeFileSync(AFK_DB_PATH, JSON.stringify(db, null, 2), "utf8");
+
+
+// ===================== ID CARD (DB) =====================
+async function getIdCard(userId) {
+  return (await safeGet(`SELECT * FROM idcard_users WHERE user_id=?`, [userId])) || null;
 }
-function setAfk(userId, reason) {
-  const db = loadAfkDB();
-  db.users[userId] = { reason: safeText(reason || "AFK", 80), since: Date.now() };
-  saveAfkDB(db);
+
+async function upsertIdCard(userId, data) {
+  const existing = await getIdCard(userId);
+  const createdAt = existing?.created_at ? Number(existing.created_at) : Date.now();
+  const number = existing?.number || data.number || genCardNumber(userId);
+
+  await dbRun(
+    `INSERT INTO idcard_users (user_id, number, name, gender, domisili, hobi, status, theme, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(user_id) DO UPDATE SET
+       name=excluded.name,
+       gender=excluded.gender,
+       domisili=excluded.domisili,
+       hobi=excluded.hobi,
+       status=excluded.status,
+       theme=excluded.theme,
+       number=excluded.number,
+       updated_at=excluded.updated_at`,
+    [userId, number, data.name, data.gender, data.domisili, data.hobi, data.status, data.theme, createdAt, Date.now()]
+  );
+
+  return getIdCard(userId);
 }
-function clearAfk(userId) {
-  const db = loadAfkDB();
-  if (db.users[userId]) {
-    delete db.users[userId];
-    saveAfkDB(db);
+
+async function countRegistry() {
+  const r = await safeGet(`SELECT COUNT(*) AS n FROM idcard_users`);
+  return Number(r?.n || 0);
+}
+
+async function registryPage(offset, limit) {
+  return (await safeAll(
+    `SELECT user_id, name, created_at
+     FROM idcard_users
+     ORDER BY created_at DESC
+     LIMIT ? OFFSET ?`,
+    [Number(limit), Number(offset)]
+  )) || [];
+}
+
+// ===== AFK Nick Helpers (prefix [AFK]) =====
+function withAfkPrefix(nickOrName) {
+  const base = String(nickOrName || "").trim() || "User";
+  if (/^\[AFK\]\s*/i.test(base)) return base;
+  const tagged = `[AFK] ${base}`;
+  return tagged.length > 32 ? tagged.slice(0, 32) : tagged;
+}
+
+function stripAfkPrefix(nickOrName) {
+  return String(nickOrName || "").replace(/^\[AFK\]\s*/i, "").trim();
+}
+
+async function trySetMemberNick(member, nickOrNull) {
+  try {
+    if (!member) return false;
+    // manageable = bot punya izin & hierarchy aman (owner / role tinggi biasanya false)
+    if (!member.manageable) return false;
+
+    // null = reset nickname (balik ke username)
+    await member.setNickname(nickOrNull);
     return true;
+  } catch (e) {
+    console.warn("[AFK] setNickname failed:", e?.message || e);
+    return false;
   }
-  return false;
-}
-function getAfk(userId) {
-  const db = loadAfkDB();
-  return db.users[userId] || null;
 }
 
-// ===================== SORTING DB (LOCK) =====================
-const SORTING_DB_PATH = path.join(__dirname, "sorting_db.json");
+// ===================== AFK =====================
+async function setAfk(userId, reason) {
+  await dbRun(
+    `INSERT INTO afk_users (user_id, reason, since)
+     VALUES (?,?,?)
+     ON CONFLICT(user_id) DO UPDATE SET reason=excluded.reason, since=excluded.since`,
+    [userId, safeText(reason || "AFK", 80), Date.now()]
+  );
+}
 
-function loadSortingDB() {
+async function clearAfk(userId) {
   try {
-    return JSON.parse(fs.readFileSync(SORTING_DB_PATH, "utf8"));
+    const r = await dbRun(`DELETE FROM afk_users WHERE user_id=?`, [userId]);
+    return (r?.changes || 0) > 0;
   } catch {
-    return { users: {} };
+    return false;
   }
 }
-function saveSortingDB(db) {
-  fs.writeFileSync(SORTING_DB_PATH, JSON.stringify(db, null, 2), "utf8");
+
+async function getAfk(userId) {
+  try {
+    return (await dbGet(`SELECT reason, since FROM afk_users WHERE user_id=?`, [userId])) || null;
+  } catch {
+    return null;
+  }
 }
-function getSortedUser(userId) {
-  const db = loadSortingDB();
-  return db.users[userId] || null; // { choice: "light"|"dark", at: number }
+
+// ===================== SORTING (LOCK) =====================
+async function getSortedUser(userId) {
+  return (await safeGet(
+    `SELECT user_id, choice, at FROM sorting_users WHERE user_id=?`,
+    [userId]
+  )) || null;
 }
-function setSortedUser(userId, choice) {
-  const db = loadSortingDB();
-  db.users[userId] = { choice, at: Date.now() };
-  saveSortingDB(db);
+
+async function setSortedUser(userId, choice) {
+  await dbRun(
+    `INSERT INTO sorting_users (user_id, choice, at)
+     VALUES (?,?,?)
+     ON CONFLICT(user_id) DO UPDATE SET choice=excluded.choice, at=excluded.at`,
+    [userId, choice, Date.now()]
+  );
+}
+
+// ===================== SORTING BAG SYSTEM =====================
+const SORT_BAG_SIZE = Number(process.env.SORT_BAG_SIZE || 20);
+const SORT_BAG_KEY = "sorting_bag_json";
+const SORT_BAG_IDX_KEY = "sorting_bag_idx";
+const SORT_LAST_KEY = "sorting_last_choice";
+
+function shuffleInPlace(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+async function loadOrCreateBag() {
+  let bagJson = await getMetaText(SORT_BAG_KEY);
+  let idxStr = await getMetaText(SORT_BAG_IDX_KEY);
+
+  let bag = null;
+  let idx = Number(idxStr || 0);
+
+  if (bagJson) {
+    try {
+      bag = JSON.parse(bagJson);
+      if (!Array.isArray(bag)) bag = null;
+    } catch {
+      bag = null;
+    }
+  }
+
+  if (!bag || bag.length < 2 || idx >= bag.length) {
+    const size = SORT_BAG_SIZE % 2 === 0 ? SORT_BAG_SIZE : SORT_BAG_SIZE + 1;
+    const half = Math.floor(size / 2);
+    bag = [];
+    for (let i = 0; i < half; i++) bag.push("light");
+    for (let i = 0; i < half; i++) bag.push("dark");
+
+    shuffleInPlace(bag);
+
+    idx = 0;
+    await setMetaText(SORT_BAG_KEY, JSON.stringify(bag));
+    await setMetaText(SORT_BAG_IDX_KEY, String(idx));
+  }
+
+  return { bag, idx };
+}
+
+async function pickChoiceFromBag() {
+  const { bag, idx } = await loadOrCreateBag();
+  const choice = bag[idx];
+
+  await setMetaText(SORT_BAG_IDX_KEY, String(idx + 1));
+  return choice === "dark" ? "dark" : "light";
+}
+
+async function pickChoiceBagMoreNatural() {
+  const last = (await getMetaText(SORT_LAST_KEY)) || null;
+
+  let choice = await pickChoiceFromBag();
+
+  if (last && choice === last) {
+    const { bag } = await loadOrCreateBag();
+    const curIdx = Number((await getMetaText(SORT_BAG_IDX_KEY)) || 0);
+    if (curIdx < bag.length) {
+      const alt = bag[curIdx];
+      await setMetaText(SORT_BAG_IDX_KEY, String(curIdx + 1));
+      choice = alt === "dark" ? "dark" : "light";
+    }
+  }
+
+  await setMetaText(SORT_LAST_KEY, choice);
+  return choice;
 }
 
 // ===================== CANVAS HELPERS =====================
@@ -321,7 +1225,7 @@ function drawParticles(ctx, area, mode = "light") {
   ctx.globalAlpha = 1;
 }
 
-// ===================== ID CARD RENDER (+ badge arcana) =====================
+// ===================== ID CARD RENDER =====================
 async function renderIdCard({ theme, number, name, gender, domisili, hobi, status, avatarUrl, createdAtText, arcanaChoice }) {
   const w = 980;
   const h = 560;
@@ -359,7 +1263,10 @@ async function renderIdCard({ theme, number, name, gender, domisili, hobi, statu
   ctx.globalAlpha = 1;
 
   const pad = 34;
-  const x = pad, y = pad, cw = w - pad * 2, ch = h - pad * 2;
+  const x = pad,
+    y = pad,
+    cw = w - pad * 2,
+    ch = h - pad * 2;
 
   ctx.save();
   ctx.shadowColor = "rgba(0,0,0,.35)";
@@ -378,12 +1285,12 @@ async function renderIdCard({ theme, number, name, gender, domisili, hobi, statu
   ctx.globalAlpha = 1;
 
   ctx.fillStyle = ink;
-  ctx.font = "bold 46px Inter, Arial";
-  ctx.fillText("HOV IDENTITY CARD", x + 34, y + 82);
+  setFont(ctx, "bold", 46);
+  ctx.fillText(ID_CARD_TITLE, x + 34, y + 82);
 
   ctx.fillStyle = subInk;
-  ctx.font = "600 20px Inter, Arial";
-  ctx.fillText("House of Valerie • Verified in the arcane", x + 36, y + 114);
+  setFont(ctx, "normal", 20);
+  ctx.fillText("Mystral Academy • Verified in the arcane", x + 36, y + 114);
 
   if (arcanaChoice === "light" || arcanaChoice === "dark") {
     const bx = x + cw - 250;
@@ -402,11 +1309,6 @@ async function renderIdCard({ theme, number, name, gender, domisili, hobi, statu
     ctx.lineWidth = 2;
     rr(ctx, bx, by, bw, bh, 14);
     ctx.stroke();
-
-    ctx.fillStyle = ink;
-    ctx.font = "700 16px Inter, Arial";
-    const label = arcanaChoice === "dark" ? "🌙 DARK ARCANE" : "✨ LIGHT ARCANE";
-    ctx.fillText(label, bx + 16, by + 24);
   }
 
   ctx.strokeStyle = line;
@@ -422,25 +1324,26 @@ async function renderIdCard({ theme, number, name, gender, domisili, hobi, statu
 
   const drawRow = (label, value, i) => {
     const yy = topListY + i * rowGap;
+
     ctx.fillStyle = subInk;
-    ctx.font = "700 18px Inter, Arial";
+    setFont(ctx, "bold", 18);
     ctx.fillText(label, lx, yy);
 
     ctx.fillStyle = ink;
-    ctx.font = "700 22px Inter, Arial";
+    setFont(ctx, "bold", 22);
     ctx.fillText(value, lx + 210, yy);
   };
 
-  drawRow("No ID", number, 0);
-  drawRow("Nama", name, 1);
-  drawRow("Gender", gender, 2);
-  drawRow("Domisili", domisili, 3);
-  drawRow("Hobi", hobi, 4);
-  drawRow("Status", status, 5);
+  drawRow("No ID", String(number || "—"), 0);
+  drawRow("Nama", String(name || "—"), 1);
+  drawRow("Gender", String(gender || "—"), 2);
+  drawRow("Domisili", String(domisili || "—"), 3);
+  drawRow("Hobi", String(hobi || "—"), 4);
+  drawRow("Status", String(status || "—"), 5);
 
   ctx.fillStyle = subInk;
-  ctx.font = "600 16px Inter, Arial";
-  ctx.fillText(`© HOV • ${BRAND_NAME}`, x + 36, y + ch - 28);
+  setFont(ctx, "normal", 16);
+  ctx.fillText(`© Mystral • ${BRAND_NAME}`, x + 36, y + ch - 28);
 
   const px = x + cw - 320;
   const py = y + 170;
@@ -470,7 +1373,7 @@ async function renderIdCard({ theme, number, name, gender, domisili, hobi, statu
 
   ctx.textAlign = "center";
   ctx.fillStyle = subInk;
-  ctx.font = "700 16px Inter, Arial";
+  setFont(ctx, "bold", 16);
   ctx.fillText("Tanggal Dibuat", cx, dateTop);
 
   ctx.strokeStyle = line;
@@ -481,8 +1384,8 @@ async function renderIdCard({ theme, number, name, gender, domisili, hobi, statu
   ctx.stroke();
 
   ctx.fillStyle = ink;
-  ctx.font = "700 20px Inter, Arial";
-  ctx.fillText(createdAtText, cx, dateTop + 38);
+  setFont(ctx, "bold", 20);
+  ctx.fillText(String(createdAtText || "—"), cx, dateTop + 38);
 
   ctx.textAlign = "left";
   return canvas.toBuffer("image/png");
@@ -492,7 +1395,6 @@ async function renderIdCard({ theme, number, name, gender, domisili, hobi, statu
 async function renderHouseCard({ choice, name, gender, hovId, avatarUrl }) {
   const w = 980;
   const h = 360;
-
   const canvas = createCanvas(w, h);
   const ctx = canvas.getContext("2d");
 
@@ -513,32 +1415,13 @@ async function renderHouseCard({ choice, name, gender, hovId, avatarUrl }) {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, w, h);
 
-  ctx.globalAlpha = isDark ? 0.33 : 0.25;
-  const orb = (x, y, r, color) => {
-    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, color);
-    g.addColorStop(1, "transparent");
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
-  };
-
-  if (isDark) {
-    orb(180, 120, 190, "#a78bfa");
-    orb(760, 110, 210, "#1e3a8a");
-    orb(820, 300, 240, "#0f172a");
-  } else {
-    orb(160, 90, 190, "#fff3b0");
-    orb(760, 110, 210, "#93c5fd");
-    orb(820, 300, 240, "#fde68a");
-  }
-  ctx.globalAlpha = 1;
-
   drawParticles(ctx, { x: 0, y: 0, w, h }, isDark ? "dark" : "light");
 
   const pad = 26;
-  const x = pad, y = pad, cw = w - pad * 2, ch = h - pad * 2;
+  const x = pad,
+    y = pad,
+    cw = w - pad * 2,
+    ch = h - pad * 2;
 
   ctx.save();
   ctx.shadowColor = "rgba(0,0,0,.35)";
@@ -555,12 +1438,12 @@ async function renderHouseCard({ choice, name, gender, hovId, avatarUrl }) {
   ctx.stroke();
 
   ctx.fillStyle = ink;
-  ctx.font = "bold 34px Inter, Arial";
-  ctx.fillText("HOUSE OF VALERIE", x + 34, y + 64);
+  setFont(ctx, "bold", 34);
+  ctx.fillText("MYSTRAL ACADEMY", x + 34, y + 64);
 
   ctx.fillStyle = subInk;
-  ctx.font = "700 20px Inter, Arial";
-  ctx.fillText(isDark ? "DARK ARCANE" : "LIGHT ARCANE", x + 34, y + 98);
+  setFont(ctx, "bold", 20);
+  ctx.fillText(isDark ? "DARK STUDENT" : "LIGHT STUDENT", x + 34, y + 98);
 
   const lx = x + 34;
   const top = y + 150;
@@ -569,11 +1452,11 @@ async function renderHouseCard({ choice, name, gender, hovId, avatarUrl }) {
   const row = (label, value, idx) => {
     const yy = top + idx * gap;
     ctx.fillStyle = subInk;
-    ctx.font = "700 18px Inter, Arial";
+    setFont(ctx, "bold", 18);
     ctx.fillText(label, lx, yy);
 
     ctx.fillStyle = ink;
-    ctx.font = "700 22px Inter, Arial";
+    setFont(ctx, "bold", 22);
     ctx.fillText(value, lx + 160, yy);
   };
 
@@ -601,98 +1484,42 @@ async function renderHouseCard({ choice, name, gender, hovId, avatarUrl }) {
   ctx.restore();
 
   ctx.fillStyle = subInk;
-  ctx.font = "600 16px Inter, Arial";
+  setFont(ctx, "normal", 16);
   ctx.fillText(isDark ? "“Bearer of the Shadow”" : "“Bearer of the Light”", x + 34, y + ch - 28);
 
   return canvas.toBuffer("image/png");
 }
 
-// ===================== REGISTRY HELPERS =====================
-function buildRegistryPages(guild, idDb) {
-  const users = idDb?.users || {};
-  const list = Object.entries(users)
-    .map(([uid, data]) => ({
-      uid,
-      name: data?.name || "—",
-      createdAt: data?.createdAt || 0,
-      inGuild: Boolean(guild?.members?.cache?.has(uid)),
-    }))
-    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-
-  const pageSize = 10;
-  const pages = [];
-  for (let i = 0; i < list.length; i += pageSize) pages.push(list.slice(i, i + pageSize));
-  return pages.length ? pages : [[]];
-}
-
-function registryEmbed(guild, pages, pageIndex) {
-  const page = pages[pageIndex] || [];
-  const totalPages = pages.length;
-  const totalUsers = pages.flat().length;
-
-  const desc =
-    page.length === 0
-      ? "Belum ada warga yang terdaftar ID Card."
-      : page
-          .map((x, idx) => {
-            const num = pageIndex * 10 + idx + 1;
-            const dateUnix = x.createdAt ? Math.floor(x.createdAt / 1000) : null;
-            const dateText = dateUnix ? `<t:${dateUnix}:D>` : "—";
-            const status = x.inGuild ? "" : " *(left)*";
-            return `**${num}.** <@${x.uid}> • **${safeText(x.name, 24)}** • ${dateText}${status}`;
-          })
-          .join("\n");
-
-  return new EmbedBuilder()
-    .setTitle("🗂️ HOV Registry — Warga Terdaftar")
-    .setDescription(desc)
-    .setColor(EMBED_COLOR)
-    .setFooter({ text: `Page ${pageIndex + 1} / ${totalPages} • Total: ${totalUsers}` })
-    .setTimestamp();
-}
-
-function registryRow(pageIndex, totalPages) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`registry:prev:${pageIndex}`)
-      .setLabel("Prev")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(pageIndex <= 0),
-    new ButtonBuilder()
-      .setCustomId(`registry:next:${pageIndex}`)
-      .setLabel("Next")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(pageIndex >= totalPages - 1)
-  );
-}
-
-// ===================== SORTING UI =====================
+// ===================== PANELS =====================
 function sortingPanelEmbed() {
+  const LIGHT = process.env.LIGHT_EMOJI || "✨";
+  const DARK = process.env.DARK_EMOJI || "🌙";
+
   return new EmbedBuilder()
-    .setTitle("<:witch:1452256560108666977> Arcane Sorting — House of Valerie")
+    .setTitle("🧙 Student Sorting — Mystral Academy")
     .setColor(EMBED_COLOR)
     .setDescription(
       [
-        "**When the veil thins, destiny answers.**",
+        "When the veil thins, destiny answers.",
         "",
-        "Lingkaran arcane kembali aktif, memanggil setiap jiwa yang melangkah ke dalam wilayah **House of Valerie**.",
-        "Dengan menyentuh segel di bawah, kau akan memasuki **Ritual Pemilahan Arcana**—hukum kuno yang menentukan afiliasimu.",
+        "Lingkaran arcane kembali aktif, memanggil setiap jiwa yang melangkah ke dalam wilayah Mystral Academy.",
+        `Dengan menyentuh segel di bawah, kau akan memasuki **Ritual Pemilahan Arcane**—hukum kuno yang menentukan afiliasimu.`,
         "",
-        "✧ Arcana akan membaca gema jiwamu dan menetapkan satu jalan:",
-        "<:light:1452229058841542748> **Light Arcana** — cahaya, tatanan, dan penjaga keseimbangan kerajaan",
-        "<:dark:1452229004663849052> **Dark Arcana** — bayangan, kehendak bebas, dan kekuatan tersembunyi",
+        "✧ Arcane akan membaca gema jiwamu dan menetapkan satu jalan:",
+        `${LIGHT} **Light Student** — cahaya, tatanan, dan penjaga keseimbangan kerajaan`,
+        `${DARK} **Dark Student** — bayangan, kehendak bebas, dan kekuatan tersembunyi`,
         "",
         "╭──────────────────────────╮",
         "📜 **Prasyarat Ritual**",
-        "Hanya mereka yang telah memiliki **Valerie ID Card**",
+        "Hanya mereka yang telah memiliki **Mystral ID Card**",
         "(dengan mantra **/idcard**)",
         "yang diizinkan memasuki lingkaran ini.",
         "",
-        "<:segelsihir:1452256773846335579> **Segel Takdir**",
+        "<:segelsihir:1459542892816236747>**Segel Takdir**",
         "Ritual ini hanya dapat dijalankan **satu kali**.",
-        "Setelah arcana memilih, hasilnya akan terkunci selamanya.",
+        "Setelah arcane memilih, hasilnya akan **terkunci selamanya**.",
         "",
-        "<:hukum:1452256507314835590> **Hukum Kerajaan Valerie**",
+        "<:hukum:1459542952907898881> **Hukum Academy Mystral**",
         "Seluruh peran lain yang telah kau miliki",
         "akan tetap utuh dan tidak terpengaruh oleh ritual ini.",
         "╰──────────────────────────╯",
@@ -700,116 +1527,63 @@ function sortingPanelEmbed() {
         "Kini, berdirilah di dalam lingkaran.",
         "**Takdir tidak menunggu mereka yang ragu.**",
       ].join("\n")
-    );
+    )
+    .setFooter({ text: "Sentuh segel untuk memulai Ritual Pemilahan Student." });
 }
 
 function sortingPanelRow() {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("sorting:roll")
-      .setLabel("Mulai Ritual")
-      .setStyle(ButtonStyle.Primary)
-      .setEmoji("<:witch:1452256560108666977>")
+    new ButtonBuilder().setCustomId("sorting:roll").setLabel("Mulai Ritual").setStyle(ButtonStyle.Primary).setEmoji("<:witch:1459543006813229199>")
   );
 }
 
-// ===================== READY / PRESENCE =====================
-client.once(Events.ClientReady, async (c) => {
-  console.log(`ONLINE AS: ${c.user.tag} | ID: ${c.user.id}`);
+function menfessPanelEmbed() {
+  return new EmbedBuilder()
+    .setTitle("🕯️ MENFESS")
+    .setColor(EMBED_COLOR)
+    .setDescription("Klik tombol untuk kirim menfess **anonim**.\nBalasan juga anonim.")
+    .setFooter({ text: "No doxxing / hate / threat. Keep it safe." });
+}
 
-  console.log("[ENV]", {
-    GUILD_ID: requireEnv("GUILD_ID"),
-    MENFESS_CHANNEL_ID: requireEnv("MENFESS_CHANNEL_ID"),
-    SORTING_CHANNEL_ID: requireEnv("SORTING_CHANNEL_ID"),
-    HOUSECARD_CHANNEL_ID: requireEnv("HOUSECARD_CHANNEL_ID"),
-    IDCARD_CHANNEL_ID: requireEnv("IDCARD_CHANNEL_ID"),
-    LIGHT_ROLE_ID: requireEnv("LIGHT_ROLE_ID"),
-    DARK_ROLE_ID: requireEnv("DARK_ROLE_ID"),
-  });
+function menfessPanelRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("menfess:new").setLabel("Kirim Menfess").setStyle(ButtonStyle.Success).setEmoji("✉️")
+  );
+}
 
-  const statuses = ["🌙 menjaga gerbang realm", "🔮 merapalkan pesan welcome", "🕯️ menemani kalian ngobrol", "✨ ketik /halo untuk menyapa"];
-  let i = 0;
+function ticketPanelEmbed() {
+  return new EmbedBuilder()
+    .setTitle("🎫 Arcane Support Desk — Mystral Academy")
+    .setColor(EMBED_COLOR)
+    .setDescription(
+      [
+        "Jika kau mengalami gangguan, kebingungan, atau menemukan pelanggaran tatanan akademi—",
+        "buka ticket secara privat di sini.",
+        "",
+        "🕯️ **Keluhan** — pengalaman tidak nyaman / konflik / hal pribadi",
+        "⚠️ **Report** — pelanggaran aturan / tindakan meresahkan",
+        "",
+        "🔐 Ticket bersifat **rahasia**: hanya kamu & staff yang dapat melihatnya.",
+        "Tolong tulis kronologi dengan jelas agar cepat ditangani.",
+      ].join("\n")
+    )
+    .setFooter({ text: "Mystral Academy • Speak freely, we will listen." });
+}
 
-  const setStatus = () => {
-    const text = statuses[i % statuses.length];
-    c.user.setPresence({
-      status: "online",
-      activities: [{ name: text, type: ActivityType.Playing }],
-    });
-    i++;
-  };
-
-  setStatus();
-  setInterval(setStatus, 30_000);
-});
-
-// ===================== AUTO WELCOME =====================
-client.on(Events.GuildMemberAdd, async (member) => {
-  const res = await getTextChannelOrExplain(member.guild, requireEnv("GENERAL_CHANNEL_ID"));
-  if (!res.ok) return;
-
-  const channel = res.channel;
-  const mention = `<@${member.id}>`;
-  const guildName = `**${member.guild.name}**`;
-  const msg = WELCOME_MESSAGES[Math.floor(Math.random() * WELCOME_MESSAGES.length)](mention, guildName);
-  channel.send(msg).catch(console.error);
-});
-
-// ===================== AFK SYSTEM =====================
-client.on(Events.MessageCreate, async (message) => {
-  try {
-    if (!message.guild) return;
-    if (message.author.bot) return;
-
-    const wasAfk = getAfk(message.author.id);
-    if (wasAfk) {
-      clearAfk(message.author.id);
-      await message
-        .reply({
-          content: `✅ welcome back <@${message.author.id}>! status AFK kamu sudah dihapus.`,
-          allowedMentions: { repliedUser: false, parse: [] },
-        })
-        .catch(() => {});
-    }
-
-    if (!message.mentions?.users?.size) return;
-
-    const lines = [];
-    for (const [uid, user] of message.mentions.users) {
-      if (user.bot) continue;
-      const afk = getAfk(uid);
-      if (!afk) continue;
-
-      const sinceUnix = Math.floor((afk.since || Date.now()) / 1000);
-      lines.push(`• <@${uid}> sedang **AFK** — ${afk.reason}\n  sejak <t:${sinceUnix}:R>`);
-      if (lines.length >= 5) break;
-    }
-
-    if (lines.length) {
-      await message
-        .reply({
-          content: `🕯️ **AFK Notice**\n${lines.join("\n")}`,
-          allowedMentions: { repliedUser: false, parse: [] },
-        })
-        .catch(() => {});
-    }
-  } catch (e) {
-    console.error("[AFK] error:", e);
-  }
-});
+function ticketPanelRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("ticket:open:complaint").setLabel("Buat Keluhan").setStyle(ButtonStyle.Primary).setEmoji("🕯️"),
+    new ButtonBuilder().setCustomId("ticket:open:report").setLabel("Buat Report").setStyle(ButtonStyle.Danger).setEmoji("⚠️")
+  );
+}
 
 // ===================== HOUSECARD POST =====================
 async function postHouseCard(guild, user, choice) {
   const houseChId = requireEnv("HOUSECARD_CHANNEL_ID");
-  const res = await getTextChannelOrExplain(guild, houseChId);
-  if (!res.ok) {
-    console.error("[HOUSECARD] channel error:", explainChannelError(res));
-    return false;
-  }
-  const houseChannel = res.channel;
+  const houseChannel = await getTextChannelOrNull(guild, houseChId);
+  if (!houseChannel) return false;
 
-  const idDb = loadIdDB();
-  const idData = idDb.users?.[user.id];
+  const idData = await getIdCard(user.id);
   if (!idData) return false;
 
   const png = await renderHouseCard({
@@ -824,20 +1598,16 @@ async function postHouseCard(guild, user, choice) {
   const file = new AttachmentBuilder(png, { name: filename });
 
   const embed = new EmbedBuilder()
-    .setTitle("🪪 Valerie House Card")
+    .setTitle("🪪 Mystral Academy Card")
     .setColor(EMBED_COLOR)
     .setDescription(
       [
         `**Member:** <@${user.id}>`,
-        `**Arcana:** ${
-          choice === "dark"
-            ? "<:dark:1452229004663849052> Dark Arcana"
-            : "<:light:1452229058841542748> Light Arcana"
-        }`,
+        `**Student:** ${choice === "dark" ? "<:dark:1459543141609771101> Dark Student" : "<:light:1459543076736336004> Light Student"}`,
       ].join("\n")
     )
     .setImage(`attachment://${filename}`)
-    .setFooter({ text: "House of Valerie • Arcane Registry" })
+    .setFooter({ text: "Mystral Academy • Student Registry" })
     .setTimestamp();
 
   await houseChannel.send({
@@ -850,14 +1620,806 @@ async function postHouseCard(guild, user, choice) {
   return true;
 }
 
+// ===================== REGISTRY UI =====================
+function registryEmbed(pageIndex, totalPages, totalUsers, pageRows) {
+  const desc =
+    pageRows.length === 0
+      ? "Belum ada student yang terdaftar ID Card."
+      : pageRows
+          .map((x, idx) => {
+            const num = pageIndex * 10 + idx + 1;
+            const dateUnix = x.created_at ? Math.floor(Number(x.created_at) / 1000) : null;
+            const dateText = dateUnix ? `<t:${dateUnix}:D>` : "—";
+            return `**${num}.** <@${x.user_id}> • **${safeText(x.name, 24) || "—"}** • ${dateText}`;
+          })
+          .join("\n");
+
+  return new EmbedBuilder()
+    .setTitle("🗂️ MYSA Registry — Student Terdaftar")
+    .setDescription(desc)
+    .setColor(EMBED_COLOR)
+    .setFooter({ text: `Page ${pageIndex + 1} / ${totalPages} • Total: ${totalUsers}` })
+    .setTimestamp();
+}
+
+function registryRow(pageIndex, totalPages) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`registry:prev:${pageIndex}`).setLabel("Prev").setStyle(ButtonStyle.Secondary).setDisabled(pageIndex <= 0),
+    new ButtonBuilder().setCustomId(`registry:next:${pageIndex}`).setLabel("Next").setStyle(ButtonStyle.Secondary).setDisabled(pageIndex >= totalPages - 1)
+  );
+}
+
+// ===================== READY =====================
+client.once(Events.ClientReady, async (c) => {
+  console.log(`ONLINE AS: ${c.user.tag} | ID: ${c.user.id}`);
+  console.log("[DB] SQLite ready:", SQLITE_PATH);
+
+  if (!process.env.BOT_OWNER_ID || process.env.BOT_OWNER_ID === "ISI_USERID_KAMU") {
+    console.warn("[WARN] BOT_OWNER_ID belum diisi bener. Owner-only lock bakal ngaco.");
+  }
+
+  const statuses = ["🌙 menjaga gerbang realm", 
+                  "🔮 membisikkan mantra penyambutan", 
+                  "🕯️ menjaga cahaya di Aula Academy Mystral",
+                  "✨ panggil aku dengan mantra /halo"
+                ];
+  let i = 0;
+  const setStatus = () => {
+    const text = statuses[i % statuses.length];
+    c.user.setPresence({
+      status: "online",
+      activities: [{ name: text, type: ActivityType.Playing }],
+    });
+    i++;
+  };
+
+  setStatus();
+  setInterval(setStatus, 30_000);
+
+    // initial stats update
+  c.guilds.cache.forEach(g => updateStatsChannels(g));
+
+  // interval update
+  setInterval(() => {
+    c.guilds.cache.forEach(g => updateStatsChannels(g));
+  }, (Number(process.env.STATS_UPDATE_MIN) || 5) * 60 * 1000);
+
+});
+
+// ===================== AUTO WELCOME =====================
+client.on(Events.GuildMemberAdd, async (member) => {
+  const channel = await getTextChannelOrNull(member.guild, requireEnv("GENERAL_CHANNEL_ID"));
+  if (!channel) return;
+
+  const mention = `<@${member.id}>`;
+  const guildName = `**${member.guild.name}**`;
+  const msg = WELCOME_MESSAGES[Math.floor(Math.random() * WELCOME_MESSAGES.length)](mention, guildName);
+  channel.send(msg).catch(() => {});
+
+    updateStatsChannels(member.guild);
+});
+
+client.on(Events.GuildMemberRemove, async (member) => {
+  updateStatsChannels(member.guild);
+});
+
+// ===================== PREFIX COMMANDS =====================
+client.on(Events.MessageCreate, async (message) => {
+  try {
+    if (!message.guild) return;
+    if (message.author.bot) return;
+
+   // AFK auto clear on any message
+  const wasAfk = await getAfk(message.author.id);
+  if (wasAfk) {
+    await clearAfk(message.author.id);
+
+  // balikin nickname (hapus prefix [AFK])
+  const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+  if (member) {
+    const current = member.nickname || message.author.username;
+    const restored = stripAfkPrefix(current);
+    // kalau restored kosong, reset nickname
+    await trySetMemberNick(member, restored || null);
+  }
+
+  await message
+    .reply({
+      content: `✅ welcome back <@${message.author.id}>! status AFK kamu sudah dihapus.`,
+      allowedMentions: { repliedUser: false, parse: [] },
+    })
+    .catch(() => {});
+}
+
+
+    // AFK notice on mentions
+    if (message.mentions?.users?.size) {
+      const lines = [];
+      for (const [uid, user] of message.mentions.users) {
+        if (user.bot) continue;
+        const afk = await getAfk(uid);
+        if (!afk) continue;
+
+        const sinceUnix = Math.floor((Number(afk.since) || Date.now()) / 1000);
+        lines.push(`• <@${uid}> sedang **AFK** — ${afk.reason}\n  sejak <t:${sinceUnix}:R>`);
+        if (lines.length >= 5) break;
+      }
+      if (lines.length) {
+        await message
+          .reply({
+            content: `🕯️ **AFK Notice**\n${lines.join("\n")}`,
+            allowedMentions: { repliedUser: false, parse: [] },
+          })
+          .catch(() => {});
+      }
+    }
+
+    // Prefix check
+    if (!message.content.startsWith(PREFIX)) return;
+
+    const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
+    const cmd = args.shift()?.toLowerCase();
+
+    // OWNER ONLY prefix commands (panel/idcard)
+    const ownerOnly = ["menfesspanel", "sortingpanel", "idcard"];
+    if (ownerOnly.includes(cmd) && !isBotOwner(message.author.id)) {
+      return message.reply({ content: "❌ command ini cuma buat pembuat bot.", allowedMentions: { repliedUser: false } });
+    }
+
+    // cping
+    if (cmd === "ping") {
+      return message.reply(`🏓 pong! ${message.client.ws.ping}ms`);
+    }
+
+   // chelp / chalp
+    if (cmd === "help" || cmd === "hai") {
+    const embed = new EmbedBuilder()
+      .setTitle("📚 Mystral Assistant — Help")
+      .setColor(EMBED_COLOR)
+      .setDescription(
+        [
+          "Daftar perintah yang tersedia di server ini.",
+          "Gunakan **slash command (/)** atau **prefix command** sesuai kebutuhan.",
+        ].join("\n")
+      )
+      .addFields(
+        {
+          name: "✨ Slash Commands",
+          value: [
+            "• `/profile` — lihat profil pengguna",
+            "• `/idcard` — buat atau lihat ID Card",
+          ].join("\n"),
+          inline: false,
+        },
+        {
+          name: "⌨️ Prefix Commands",
+          value: [
+            `• \`${PREFIX}help\` — tampilkan help`,
+            `• \`${PREFIX}ping\` — cek ping bot`,
+            `• \`${PREFIX}halo\` — sapaan`,
+            `• \`${PREFIX}afk [alasan]\` — set AFK`,
+            `• \`${PREFIX}userinfo [@user]\``,
+            `• \`${PREFIX}avatar [@user]\``,
+            `• \`${PREFIX}serverinfo\``,
+          ].join("\n"),
+          inline: false,
+        },
+        {
+          name: "🔐 Owner-only",
+          value: [
+            "• `/menfesspanel`",
+            "• `/sortingpanel`",
+            "• `/selfrolespanel`",
+            "• `/sendembed`",
+            "• `/idcard`",
+          ].join("\n"),
+          inline: false,
+        }
+      )
+      .setFooter({ text: "Mystral Academy • Help Center" })
+      .setTimestamp();
+      return message.reply({ embeds: [embed], allowedMentions: { repliedUser: false, parse: [] } });
+    }
+
+    // chalo (prefix) tetap ada sebagai sapaan singkat
+    if (cmd === "halo") {
+      return message.reply(`✨ salam, <@${message.author.id}>. gerbang Mystral menyambutmu. 🕯️`);
+    }
+
+    // cembed
+    if (cmd === "embed") {
+      if (!isBotOwner(message.author.id)) {
+        return message.reply({ content: "❌ command ini cuma buat pembuat bot.", allowedMentions: { repliedUser: false } });
+      }
+
+      const raw = args.join(" ");
+      const parts = raw.split("|").map((s) => s.trim()).filter(Boolean);
+
+      if (parts.length < 2) {
+        return message.reply({
+          content: "Format: `cembed Judul | Deskripsi` (opsional warna: `| #77d0d7`)",
+          allowedMentions: { repliedUser: false },
+        });
+      }
+
+      const title = parts[0];
+      let description = parts[1];
+      let color = EMBED_COLOR;
+
+      // kalau ada argumen 3 dan bentuknya hex, anggap warna
+      if (parts[2] && /^#?[0-9a-fA-F]{6}$/.test(parts[2])) {
+        color = parseInt(parts[2].replace("#", ""), 16);
+      } else if (parts.length > 2) {
+        // kalau bukan warna, gabungkan ke deskripsi biar nggak hilang
+        description = parts.slice(1).join("\n");
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle(title)
+        .setDescription(description)
+        .setColor(color)
+        .setFooter({ text: "Mystral Academy • Arcane Notice" })
+        .setTimestamp();
+
+      await message.channel.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => null);
+      return message.reply({ content: "✅ embed terkirim.", allowedMentions: { repliedUser: false } });
+    }
+
+
+    //cticketpanel
+    if (cmd === "ticketpanel") {
+      if (!isBotOwner(message.author.id)) {
+        return message.reply({ content: "❌ command ini cuma buat pembuat bot.", allowedMentions: { repliedUser: false } });
+      }
+      await message.channel.send({ embeds: [ticketPanelEmbed()], components: [ticketPanelRow()], allowedMentions: { parse: [] } });
+      return message.reply({ content: "✅ panel ticket terkirim.", allowedMentions: { repliedUser: false } });
+    }
+
+    // cavatar
+    if (cmd === "avatar") {
+      const mentioned = message.mentions.users.first();
+      let user = mentioned || message.author;
+
+      if (!mentioned && args[0] && /^\d{15,25}$/.test(args[0])) {
+        const fetched = await message.client.users.fetch(args[0]).catch(() => null);
+        if (fetched) user = fetched;
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle("🖼️ Avatar")
+        .setColor(EMBED_COLOR)
+        .setDescription(`Avatar milik <@${user.id}>`)
+        .setImage(user.displayAvatarURL({ extension: "png", size: 1024 }))
+        .setFooter({ text: BRAND_NAME })
+        .setTimestamp();
+
+      return message.reply({ embeds: [embed], allowedMentions: { repliedUser: false } });
+    }
+
+    // cuserinfo (PREFIX)
+    if (cmd === "userinfo") {
+      const mentioned = message.mentions.users.first();
+      let user = mentioned || message.author;
+
+      // allow by ID
+      if (!mentioned && args[0] && /^\d{15,25}$/.test(args[0])) {
+        const fetched = await message.client.users.fetch(args[0]).catch(() => null);
+        if (fetched) user = fetched;
+      }
+
+      const guild = message.guild;
+      const member = await guild.members.fetch(user.id).catch(() => null);
+
+      // ===== Dates =====
+      const createdUnix = Math.floor((user.createdTimestamp || Date.now()) / 1000);
+      const joinedUnix = member?.joinedTimestamp ? Math.floor(member.joinedTimestamp / 1000) : null;
+
+      // ===== Roles (HIGHEST -> LOWEST) =====
+      const roleList = member
+        ? member.roles.cache
+            .filter((r) => r.id !== guild.id)
+            .sort((a, b) => b.position - a.position)
+            .map((r) => r.toString())
+        : [];
+
+      const maxRolesShown = 15;
+      const rolesShown = roleList.slice(0, maxRolesShown);
+      const rolesMore = Math.max(0, roleList.length - rolesShown.length);
+
+      // ===== Highest Role =====
+      const topRole =
+        member?.roles.cache
+          .filter((r) => r.id !== guild.id)
+          .sort((a, b) => b.position - a.position)
+          .first() || null;
+
+      // ===== Nick / Display =====
+      const nickname = member?.nickname || "—";
+      const displayName = member?.displayName || user.username;
+
+      // ===== Banner (needs user full fetch) =====
+      const userFull = await message.client.users.fetch(user.id, { force: true }).catch(() => null);
+      const bannerUrl = userFull?.bannerURL?.({ extension: "png", size: 1024 }) || null;
+
+      const embed = new EmbedBuilder()
+        .setTitle(`Mystral Profile — ${displayName}`)
+        .setColor(EMBED_COLOR)
+        .setThumbnail(user.displayAvatarURL({ extension: "png", size: 256 }))
+        .setDescription(`**Mention:** <@${user.id}>`)
+        .addFields(
+          {
+            name: "🪪 Identity",
+            value: [
+              `**Tag:** ${user.tag}`,
+              `**User ID:** \`${user.id}\``,
+              `**Nickname:** ${nickname === "—" ? "—" : `\`${nickname}\``}`,
+            ].join("\n"),
+            inline: true,
+          },
+          {
+            name: "🕰️ Timeline",
+            value: [
+              `**Akun Dibuat:** <t:${createdUnix}:F>`,
+              `**Join Server:** ${joinedUnix ? `<t:${joinedUnix}:F>` : "—"}`,
+              `**Relative:** <t:${createdUnix}:R>${joinedUnix ? ` • <t:${joinedUnix}:R>` : ""}`,
+            ].join("\n"),
+            inline: true,
+          },
+          {
+            name: "🎭 Roles",
+            value: roleList.length
+              ? `${rolesShown.join(" ")}${rolesMore ? `\n…dan **${rolesMore}** role lain.` : ""}`
+              : "—",
+            inline: false,
+          },
+          {
+            name: "🏷️ Highest Role",
+            value: topRole ? `${topRole} *(pos ${topRole.position})*` : "—",
+            inline: true,
+          },
+          {
+            name: "🧩 Server",
+            value: `**${guild.name}**\nID: \`${guild.id}\``,
+            inline: true,
+          }
+        )
+        .setFooter({ text: `${BRAND_NAME} • Student Registry` })
+        .setTimestamp();
+
+      if (bannerUrl) embed.setImage(bannerUrl);
+
+      return message.reply({ embeds: [embed], allowedMentions: { repliedUser: false, parse: [] } });
+    }
+
+    // cprofile (PREFIX)
+if (cmd === "profile") {
+  const mentioned = message.mentions.users.first();
+  let user = mentioned || message.author;
+
+  if (!mentioned && args[0] && /^\d{15,25}$/.test(args[0])) {
+    const fetched = await message.client.users.fetch(args[0]).catch(() => null);
+    if (fetched) user = fetched;
+  }
+
+  const guild = message.guild;
+  const member = await guild.members.fetch(user.id).catch(() => null);
+
+  const { embed, idData, sorted, afk } = await buildProfileEmbed({ guild, user, member });
+
+  const row = profileButtons({
+    hasIdCard: Boolean(idData),
+    hasSorted: Boolean(sorted?.choice),
+    isAfk: Boolean(afk),
+  });
+
+  return message.reply({
+    embeds: [embed],
+    components: [row],
+    allowedMentions: { repliedUser: false, parse: [] },
+  });
+}
+
+    // cserverinfo
+    if (cmd === "serverinfo") {
+      const g = message.guild;
+      if (!g) return;
+
+      // fetch data
+      const owner = await g.fetchOwner().catch(() => null);
+      const channels = await g.channels.fetch().catch(() => null);
+
+      // counts
+      const totalMembers = g.memberCount ?? 0;
+
+      const channelCount = channels ? channels.size : 0;
+      const textCount = channels ? channels.filter((c) => c?.type === 0).size : 0;
+      const voiceCount = channels ? channels.filter((c) => c?.type === 2).size : 0;
+      const categoryCount = channels ? channels.filter((c) => c?.type === 4).size : 0;
+      const forumCount = channels ? channels.filter((c) => c?.type === 15).size : 0;
+      const stageCount = channels ? channels.filter((c) => c?.type === 13).size : 0;
+      const threadCount = channels ? channels.filter((c) => [11, 12].includes(c?.type)).size : 0;
+
+      const roleCount = g.roles?.cache?.size ? Math.max(0, g.roles.cache.size - 1) : 0;
+
+      // boosts
+      const boostTier = g.premiumTier ?? 0;
+      const boostCount = g.premiumSubscriptionCount ?? 0;
+
+      // verification
+      const verMap = {
+        0: "🔓 None",
+        1: "🪶 Low",
+        2: "🛡️ Medium",
+        3: "🔒 High",
+        4: "👑 Very High",
+      };
+      const verLabel = verMap[g.verificationLevel] || `Level ${g.verificationLevel ?? "—"}`;
+
+      // created
+      const createdUnix = Math.floor((g.createdTimestamp || Date.now()) / 1000);
+
+      // visuals
+      const icon = g.iconURL({ extension: "png", size: 512 });
+      const banner = g.bannerURL?.({ extension: "png", size: 1024 }) || null;
+
+      const embed = new EmbedBuilder()
+        .setTitle("🏛️ Mystral Academy — Realm Dossier")
+        .setColor(EMBED_COLOR)
+        .setThumbnail(icon)
+        .setDescription(
+          [
+            `**Realm:** **${g.name}**`,
+            `**Realm ID:** \`${g.id}\``,
+            owner ? `**Sovereign:** <@${owner.id}>` : `**Sovereign:** —`,
+          ].join("\n")
+        )
+        .addFields(
+          {
+            name: "🧭 Population",
+            value: [
+              `**Members:** **${totalMembers.toLocaleString("id-ID")}**`,
+              `**Boosts:** **${boostCount.toLocaleString("id-ID")}**`,
+              `**Boost Tier:** **${boostTier}**`,
+            ].join("\n"),
+            inline: true,
+          },
+          {
+            name: "🗺️ Channels",
+            value: channels
+              ? [
+                  `**Total:** **${channelCount}**`,
+                  `💬 Text: ${textCount}`,
+                  `🔊 Voice: ${voiceCount}`,
+                  `🗂️ Category: ${categoryCount}`,
+                  `🧵 Threads: ${threadCount}`,
+                  `🧷 Forum: ${forumCount}`,
+                  `🎙️ Stage: ${stageCount}`,
+                ].join("\n")
+              : "⚠️ tidak bisa fetch channel.",
+            inline: true,
+          },
+          {
+            name: "🎭 Structure",
+            value: [
+              `**Roles:** **${roleCount}**`,
+              `**Verification:** ${verLabel}`,
+              `**Created:** <t:${createdUnix}:F>`,
+              `**Age:** <t:${createdUnix}:R>`,
+            ].join("\n"),
+            inline: false,
+          }
+        )
+        .setFooter({ text: `${BRAND_NAME} • Student Registry` })
+        .setTimestamp();
+
+      // 🔥 banner only if exists
+      if (banner) embed.setImage(banner);
+
+      return message.reply({
+        embeds: [embed],
+        allowedMentions: { repliedUser: false, parse: [] },
+      });
+    }
+
+
+    // cafk
+    if (cmd === "afk") {
+      const reason = args.join(" ") || "AFK";
+      await setAfk(message.author.id, reason);
+
+      // set nickname jadi [AFK] ...
+      const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+      if (member) {
+        const base = member.nickname || message.author.username;
+        await trySetMemberNick(member, withAfkPrefix(base));
+      }
+
+      return message.reply({
+      content: `🕯️ <@${message.author.id}> kini berstatus **AFK** — ${safeText(reason, 80)}`,
+      allowedMentions: { repliedUser: false },
+    });
+  }
+
+    // Owner-only: cmenfesspanel
+    if (cmd === "menfesspanel") {
+      const ch = await getTextChannelOrNull(message.guild, requireEnv("MENFESS_CHANNEL_ID"));
+      if (!ch) return message.reply("⚠️ MENFESS_CHANNEL_ID tidak ketemu / bot tidak punya akses / bukan text channel.");
+
+      await ch.send({ embeds: [menfessPanelEmbed()], components: [menfessPanelRow()], allowedMentions: { parse: [] } });
+      return message.reply({ content: "✅ panel menfess terkirim.", allowedMentions: { repliedUser: false } });
+    }
+
+    // Owner-only: csortingpanel
+    if (cmd === "sortingpanel") {
+      const targetChannelId = requireEnv("SORTING_CHANNEL_ID") || message.channelId;
+      const ch = await getTextChannelOrNull(message.guild, targetChannelId);
+      if (!ch) return message.reply("⚠️ SORTING_CHANNEL_ID tidak valid / bot tidak punya akses / bukan text channel.");
+
+      await ch.send({ embeds: [sortingPanelEmbed()], components: [sortingPanelRow()], allowedMentions: { parse: [] } });
+      return message.reply({ content: "✅ panel sorting terkirim.", allowedMentions: { repliedUser: false } });
+    }
+
+    // Owner-only: cidcard (arahin ke slash)
+    if (cmd === "idcard") {
+      return message.reply("🪪 pakai slash **/idcard** ya (fiturnya terkunci khusus owner).");
+    }
+  } catch (e) {
+    console.error("[PREFIX CMD ERROR]", e);
+  }
+});
+
 // ===================== INTERACTIONS =====================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+
+        // ===================== STRING SELECT (SELF ROLES) =====================
+        if (interaction.isStringSelectMenu()) {
+          const { customId, values, guild, member } = interaction;
+
+          if (!guild || !member) {
+            return interaction.reply({
+              content: "⚠️ Interaction ini hanya bisa dipakai di server.",
+              flags: MessageFlags.Ephemeral
+            });
+          }
+          try {
+            // ===== AGE (1 role only) =====
+            if (customId === "self:age") {
+              const toRemove = member.roles.cache.filter((r) => SELF_AGE_IDS.includes(r.id));
+              if (toRemove.size) await member.roles.remove(toRemove);
+
+              if (values.length) await member.roles.add(values[0]);
+              return interaction.editReply("✅ **Age role** berhasil diperbarui.");
+            }
+
+            // ===== STATUS (1 role only) =====
+            if (customId === "self:status") {
+              const toRemove = member.roles.cache.filter((r) => SELF_STATUS_IDS.includes(r.id));
+              if (toRemove.size) await member.roles.remove(toRemove);
+
+              if (values.length) {
+                await member.roles.add(values[0]);
+                return interaction.editReply("💖 **Status role** diperbarui.");
+              }
+
+              return interaction.editReply("🧹 **Status role** dihapus.");
+            }
+
+            // ===== REGION (1 role only) =====
+            if (customId === "self:region") {
+              const toRemove = member.roles.cache.filter((r) => SELF_REGION_IDS.includes(r.id));
+              if (toRemove.size) await member.roles.remove(toRemove);
+
+              if (values.length) {
+                await member.roles.add(values[0]);
+                return interaction.editReply("🗺️ **Region role** diperbarui.");
+              }
+
+              return interaction.editReply("🧹 **Region role** dihapus.");
+            }
+
+            // ===== PING (MULTI) =====
+            if (customId === "self:ping") {
+              const toRemove = member.roles.cache.filter((r) => SELF_PING_IDS.includes(r.id));
+              if (toRemove.size) await member.roles.remove(toRemove);
+
+              if (values.length) await member.roles.add(values);
+              return interaction.editReply("🔔 **Ping roles** diperbarui.");
+            }
+
+            // ===== INTEREST (MULTI, per kategori) =====
+            if (customId.startsWith("self:int_")) {
+              const optionsForThisMenu = INTEREST_MENU_MAP[customId] || [];
+              const idsForThisMenu = optionsForThisMenu.map((x) => x.value);
+
+              const toRemove = member.roles.cache.filter((r) => idsForThisMenu.includes(r.id));
+              if (toRemove.size) await member.roles.remove(toRemove);
+
+              if (values.length) await member.roles.add(values);
+
+              return interaction.editReply("🎯 **Interest roles** diperbarui.");
+            }
+
+            return interaction.editReply("⚠️ Select menu tidak dikenali.");
+          } catch (err) {
+            console.error("[SELF ROLE ERROR]", err);
+            return interaction.editReply("❌ Gagal mengubah role. Cek permission bot.");
+          }
+        }
+
     // ===================== SLASH =====================
     if (interaction.isChatInputCommand()) {
       const name = interaction.commandName;
 
       if (name === "ping") return safeReply(interaction, { content: `🏓 pong! ${client.ws.ping}ms` });
+      
+      if (name === "help") {
+        const embed = new EmbedBuilder()
+          .setTitle("📜 Mystral Assistant — Help (Slash)")
+          .setColor(EMBED_COLOR)
+          .setDescription(
+            [
+              "Selamat datang di aula panduan.",
+              "Di bawah ini daftar mantra (slash command) yang tersedia di server ini.",
+            ].join("\n")
+          )
+          .addFields(
+            {
+              name: "🧭 Basic",
+              value: ["• `/help`", "• `/ping`", "• `/halo`", "• `/about`"].join("\n"),
+              inline: true,
+            },
+            {
+              name: "🪞 Info",
+              value: [
+                "• `/avatar [user]`",
+                "• `/userinfo [user]`",
+                "• `/serverinfo`",
+                "• `/profile [user]`",
+              ].join("\n"),
+              inline: true,
+            },
+            {
+              name: "🕯️ AFK",
+              value: ["• `/afk [reason]` — set AFK dan tandai nickname **[AFK]**"].join("\n"),
+              inline: false,
+            },
+            {
+              name: "🪪 Registry / Arcana",
+              value: ["• `/registry`", "• `/myhouse [user]`"].join("\n"),
+              inline: false,
+            },
+            {
+              name: "🔐 Owner-only",
+              value: [
+                "• `/selfrolespanel` — kirim panel self roles",
+                "• `/menfesspanel`",
+                "• `/sortingpanel`",
+                "• `/ticketpanel`",
+                "• `/sendembed` — kirim embed custom",
+                "• `/idcard`",
+              ].join("\n"),
+              inline: false,
+            }
+          )
+          .setFooter({ text: "Mystral Academy • Follow the rules, respect the realm." })
+          .setTimestamp();
+
+        return safeReply(interaction, {
+          embeds: [embed],
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      // ===================== SELF ROLES PANEL (OWNER-ONLY) =====================
+      if (name === "selfrolespanel") {
+        if (!isBotOwner(interaction.user.id)) {
+          return safeReply(interaction, { content: "❌ khusus pembuat bot.", flags: MessageFlags.Ephemeral });
+        }
+
+        const [eAge, eInt, eStatus, eRegion, ePing] = selfrolesPanelEmbeds();
+
+        const rowAge = new ActionRowBuilder().addComponents(
+          buildSelfSelect("self:age", "Pilih Age (1)", SELFROLES.age, 1)
+        );
+
+        const rowGame = new ActionRowBuilder().addComponents(
+          buildSelfSelect("self:int_gaming", "Gaming (pilih bebas)", SELFROLES.interest.gaming, Math.min(SELFROLES.interest.gaming.length, 25))
+        );
+
+        const rowEnt = new ActionRowBuilder().addComponents(
+          buildSelfSelect("self:int_ent", "Entertainment (pilih bebas)", SELFROLES.interest.entertainment, Math.min(SELFROLES.interest.entertainment.length, 25))
+        );
+
+        const rowCre = new ActionRowBuilder().addComponents(
+          buildSelfSelect("self:int_creative", "Creative (pilih bebas)", SELFROLES.interest.creative, Math.min(SELFROLES.interest.creative.length, 25))
+        );
+
+        const rowStatus = new ActionRowBuilder().addComponents(
+          buildSelfSelect("self:status", "Pilih Status (opsional, 1)", SELFROLES.status, 1)
+        );
+        const rowRegion = new ActionRowBuilder().addComponents(
+          buildSelfSelect("self:region", "Pilih Region (1)", SELFROLES.region || [], 1)
+        );
+
+        const rowPing = new ActionRowBuilder().addComponents(
+          buildSelfSelect("self:ping", "Pilih Ping Roles (multi)", SELFROLES.ping || [], Math.min((SELFROLES.ping || []).length, 25))
+        );
+
+        await interaction.reply({ content: "✅ Panel self-role dikirim.", flags: MessageFlags.Ephemeral });
+        await interaction.channel.send({ embeds: [eAge], components: [rowAge] });
+        await interaction.channel.send({ embeds: [eInt], components: [rowGame, rowEnt, rowCre] });
+        await interaction.channel.send({ embeds: [eStatus], components: [rowStatus] });
+        await interaction.channel.send({ embeds: [eRegion], components: [rowRegion] });
+        await interaction.channel.send({ embeds: [ePing], components: [rowPing] });
+
+        return;
+      }
+      // ===================== END SELF ROLES PANEL =====================
+
+      function parseHexColor(input, fallback = EMBED_COLOR) {
+        if (!input) return fallback;
+        const s = String(input).trim().replace(/^0x/i, "#");
+        const m = s.match(/^#?([0-9a-fA-F]{6})$/);
+        if (!m) return fallback;
+        return parseInt(m[1], 16);
+      }
+
+      function isValidUrl(u) {
+        try {
+          const url = new URL(u);
+          return url.protocol === "http:" || url.protocol === "https:";
+        } catch {
+          return false;
+        }
+      }
+
+      // ... di dalam interaction.isChatInputCommand()
+      if (name === "sendembed") {
+        if (!isBotOwner(interaction.user.id)) {
+          return safeReply(interaction, { content: "❌ khusus pembuat bot.", flags: MessageFlags.Ephemeral });
+        }
+
+        const title = interaction.options.getString("title");
+        const description = interaction.options.getString("description");
+        const channel = interaction.options.getChannel("channel") || interaction.channel;
+
+        const colorRaw = interaction.options.getString("color");
+        const footerRaw = interaction.options.getString("footer");
+        const img = interaction.options.getString("image");
+        const thumb = interaction.options.getString("thumbnail");
+
+        // safety: pastikan channel text-based
+        if (!channel?.isTextBased?.()) {
+          return safeReply(interaction, { content: "⚠️ channel tujuan harus text channel.", flags: MessageFlags.Ephemeral });
+        }
+
+        const embed = new EmbedBuilder()
+          .setTitle(title)
+          .setDescription(description)
+          .setColor(parseHexColor(colorRaw, EMBED_COLOR))
+          .setTimestamp();
+
+        // lore footer default
+        embed.setFooter({ text: footerRaw?.trim() || "Mystral Academy • Arcane Notice" });
+
+        if (thumb && isValidUrl(thumb)) embed.setThumbnail(thumb);
+        if (img && isValidUrl(img)) embed.setImage(img);
+
+        await channel.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => null);
+
+        return safeReply(interaction, { content: "✅ embed terkirim.", flags: MessageFlags.Ephemeral });
+      }
+
+     
+      //ticketpanel
+      if (name === "ticketpanel") {
+      if (!isBotOwner(interaction.user.id)) {
+        return safeReply(interaction, { content: "❌ khusus pembuat bot.", flags: MessageFlags.Ephemeral });
+      }
+      await interaction.channel.send({ embeds: [ticketPanelEmbed()], components: [ticketPanelRow()], allowedMentions: { parse: [] } });
+      return safeReply(interaction, { content: "✅ panel ticket terkirim.", flags: MessageFlags.Ephemeral });
+    }
 
       if (name === "halo") {
         const serverName = interaction.guild?.name || "realm ini";
@@ -886,40 +2448,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             { name: "⏳ Uptime", value: `${hours}h ${mins}m ${secs}s`, inline: true },
             { name: "🧩 Version", value: "discord.js v14", inline: true }
           )
-          .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
+          .setThumbnail(client.user.displayAvatarURL({ extension: "png", size: 256 }))
           .setFooter({ text: `ID: ${client.user.id}` })
-          .setTimestamp();
-
-        return safeReply(interaction, { embeds: [embed] });
-      }
-
-      if (name === "userinfo") {
-        const user = interaction.options.getUser("user") || interaction.user;
-        const member = interaction.guild ? await interaction.guild.members.fetch(user.id).catch(() => null) : null;
-
-        const created = `<t:${Math.floor(user.createdTimestamp / 1000)}:F>`;
-        const joined = member?.joinedTimestamp ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>` : "—";
-
-        const roles =
-          member?.roles.cache
-            .filter((r) => interaction.guild && r.id !== interaction.guild.id)
-            .map((r) => r.toString())
-            .slice(0, 15) || [];
-
-        const rolesText =
-          roles.length > 0 ? roles.join(" ") + ((member?.roles.cache.size || 1) - 1 > 15 ? " …" : "") : "—";
-
-        const embed = new EmbedBuilder()
-          .setTitle(`👤 User Info — ${user.username}`)
-          .setColor(EMBED_COLOR)
-          .setThumbnail(user.displayAvatarURL({ size: 256 }))
-          .addFields(
-            { name: "🏷️ Tag", value: `${user.tag}`, inline: true },
-            { name: "🆔 ID", value: `${user.id}`, inline: true },
-            { name: "📅 Created", value: created, inline: false },
-            { name: "📌 Joined Server", value: joined, inline: false },
-            { name: "🎭 Roles", value: rolesText, inline: false }
-          )
           .setTimestamp();
 
         return safeReply(interaction, { embeds: [embed] });
@@ -927,121 +2457,302 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (name === "avatar") {
         const user = interaction.options.getUser("user") || interaction.user;
-        const member = interaction.guild ? await interaction.guild.members.fetch(user.id).catch(() => null) : null;
-
-        const globalAvatar = user.displayAvatarURL({ extension: "png", size: 1024 });
-        const serverAvatar = member?.avatarURL({ extension: "png", size: 1024 }) || null;
 
         const embed = new EmbedBuilder()
-          .setTitle(`🖼️ Avatar — ${user.username}`)
+          .setTitle("🖼️ Avatar")
           .setColor(EMBED_COLOR)
-          .setDescription(serverAvatar ? "Menampilkan **Server Avatar** (kalau ada) + Global Avatar." : "Menampilkan **Global Avatar**.")
-          .setImage(serverAvatar || globalAvatar)
-          .addFields(
-            { name: "Global Avatar", value: globalAvatar, inline: false },
-            ...(serverAvatar ? [{ name: "Server Avatar", value: serverAvatar, inline: false }] : [])
-          )
-          .setTimestamp();
-
-        return safeReply(interaction, { embeds: [embed] });
-      }
-
-      if (name === "afk") {
-        const reason = interaction.options.getString("reason") || "AFK";
-        setAfk(interaction.user.id, reason);
-        return safeReply(interaction, {
-          content: `🕯️ <@${interaction.user.id}> sekarang **AFK** — ${safeText(reason, 80)}`,
-          allowedMentions: { parse: [] },
-        });
-      }
-
-      if (name === "registry") {
-        if (!interaction.guild)
-          return safeReply(interaction, { content: "Command ini cuma bisa dipakai di server ya.", flags: InteractionResponseFlags.Ephemeral });
-
-        await interaction.guild.members.fetch({ withPresences: false }).catch(() => null);
-
-        const idDb = loadIdDB();
-        const pages = buildRegistryPages(interaction.guild, idDb);
-        const pageIndex = 0;
-
-        const embed = registryEmbed(interaction.guild, pages, pageIndex);
-        const row = registryRow(pageIndex, pages.length);
-
-        return safeReply(interaction, { embeds: [embed], components: [row], allowedMentions: { parse: [] } });
-      }
-
-      if (name === "serverinfo") {
-        const g = interaction.guild;
-        if (!g) return safeReply(interaction, { content: "Ini cuma bisa dipakai di server ya 👀", flags: InteractionResponseFlags.Ephemeral });
-
-        const owner = await g.fetchOwner().catch(() => null);
-        const channels = await g.channels.fetch().catch(() => g.channels.cache);
-        const textCount = channels.filter((c) => c?.isTextBased?.()).size;
-        const voiceCount = channels.filter((c) => c?.isVoiceBased?.()).size;
-
-        const boosts = g.premiumSubscriptionCount || 0;
-        const boostTier = g.premiumTier ?? 0;
-
-        const embed = new EmbedBuilder()
-          .setTitle(`🏰 Server Info — ${g.name}`)
-          .setColor(EMBED_COLOR)
-          .setThumbnail(g.iconURL({ size: 256 }))
-          .addFields(
-            { name: "👑 Owner", value: owner ? `<@${owner.id}>` : "Unknown", inline: true },
-            { name: "👥 Members", value: `${g.memberCount}`, inline: true },
-            { name: "💎 Boost", value: `Tier ${boostTier} • ${boosts} boosts`, inline: true },
-            { name: "💬 Channels", value: `Text: ${textCount}\nVoice: ${voiceCount}\nTotal: ${channels.size}`, inline: true },
-            { name: "🎭 Roles", value: `${g.roles.cache.size}`, inline: true },
-            { name: "✅ Verification", value: `${g.verificationLevel}`, inline: true },
-            { name: "📅 Created", value: `<t:${Math.floor(g.createdTimestamp / 1000)}:F>`, inline: false }
-          )
-          .setFooter({ text: `Server ID: ${g.id}` })
+          .setDescription(`Avatar milik <@${user.id}>`)
+          .setImage(user.displayAvatarURL({ extension: "png", size: 1024 }))
+          .setFooter({ text: BRAND_NAME })
           .setTimestamp();
 
         return safeReply(interaction, { embeds: [embed], allowedMentions: { parse: [] } });
       }
 
-      if (name === "menfesspanel") {
-        if (!interaction.inGuild()) {
-          return safeReply(interaction, {
-            content: "⚠️ Command ini harus dipakai di server (bukan DM/App chat).",
-            flags: InteractionResponseFlags.Ephemeral,
-          });
-        }
+      //userinfo
+      if (name === "userinfo") {
+        const user = interaction.options.getUser("user") || interaction.user;
+        await safeDefer(interaction, false);
 
-        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          return safeReply(interaction, { content: "command ini cuma buat admin ya 👀", flags: InteractionResponseFlags.Ephemeral });
-        }
+        const guild = interaction.guild;
+        const member = await guild?.members.fetch(user.id).catch(() => null);
 
-        const res = await getTextChannelOrExplain(interaction.guild, requireEnv("MENFESS_CHANNEL_ID"));
-        if (!res.ok) {
-          return safeReply(interaction, {
-            content: `⚠️ MENFESS panel gagal: ${explainChannelError(res)}`,
-            flags: InteractionResponseFlags.Ephemeral,
-          });
-        }
-        const ch = res.channel;
+        // ===== Dates =====
+        const createdUnix = Math.floor((user.createdTimestamp || Date.now()) / 1000);
+        const joinedUnix = member?.joinedTimestamp ? Math.floor(member.joinedTimestamp / 1000) : null;
+
+        // ===== Roles (HIGHEST -> LOWEST) =====
+        const roleList = member
+          ? member.roles.cache
+              .filter((r) => r.id !== guild.id) // buang @everyone
+              .sort((a, b) => b.position - a.position)
+              .map((r) => r.toString())
+          : [];
+
+        const maxRolesShown = 15;
+        const rolesShown = roleList.slice(0, maxRolesShown);
+        const rolesMore = Math.max(0, roleList.length - rolesShown.length);
+
+        // ===== Highest Role =====
+        const topRole =
+          member?.roles.cache
+            .filter((r) => r.id !== guild.id)
+            .sort((a, b) => b.position - a.position)
+            .first() || null;
+
+        // ===== Nick / Display =====
+        const nickname = member?.nickname || "—";
+        const displayName = member?.displayName || user.username;
+
+        // ===== Banner (needs fetch user full) =====
+        const userFull = await client.users.fetch(user.id, { force: true }).catch(() => null);
+        const bannerUrl = userFull?.bannerURL?.({ extension: "png", size: 1024 }) || null;
 
         const embed = new EmbedBuilder()
-          .setTitle("🕯️ MENFESS")
+          .setTitle(`Mystral Profile — ${displayName}`)
           .setColor(EMBED_COLOR)
-          .setDescription("Klik tombol untuk kirim menfess **anonim**.\nBalasan juga bisa anonim.")
-          .setFooter({ text: "No doxxing / hate / threat. Keep it safe." });
+          .setThumbnail(user.displayAvatarURL({ extension: "png", size: 256 }))
+          .setDescription(`**Mention:** <@${user.id}>`)
+          .addFields(
+            {
+              name: "🪪 Identity",
+              value: [
+                `**Tag:** ${user.tag}`,
+                `**User ID:** \`${user.id}\``,
+                `**Nickname:** ${nickname === "—" ? "—" : `\`${nickname}\``}`,
+              ].join("\n"),
+              inline: true,
+            },
+            {
+              name: "🕰️ Timeline",
+              value: [
+                `**Akun Dibuat:** <t:${createdUnix}:F>`,
+                `**Join Server:** ${joinedUnix ? `<t:${joinedUnix}:F>` : "—"}`,
+                `**Relative:** <t:${createdUnix}:R>${joinedUnix ? ` • <t:${joinedUnix}:R>` : ""}`,
+              ].join("\n"),
+              inline: true,
+            },
+            {
+              name: "🎭 Roles",
+              value: roleList.length
+                ? `${rolesShown.join(" ")}${rolesMore ? `\n…dan **${rolesMore}** role lain.` : ""}`
+                : "—",
+              inline: false,
+            },
+            {
+              name: "🏷️ Highest Role",
+              value: topRole ? `${topRole} *(pos ${topRole.position})*` : "—",
+              inline: true,
+            },
+            {
+              name: "🧩 Server",
+              value: guild ? `**${guild.name}**\nID: \`${guild.id}\`` : "—",
+              inline: true,
+            }
+          )
+          .setFooter({ text: `${BRAND_NAME} • Student Registry` })
+          .setTimestamp();
 
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("menfess:new").setLabel("Kirim Menfess").setStyle(ButtonStyle.Success).setEmoji("✉️")
-        );
+        if (bannerUrl) embed.setImage(bannerUrl);
 
-        await ch.send({ embeds: [embed], components: [row], allowedMentions: { parse: [] } });
-        return safeReply(interaction, { content: "✅ panel menfess terkirim ke channel menfess.", flags: InteractionResponseFlags.Ephemeral });
+        return safeReply(interaction, { embeds: [embed], allowedMentions: { parse: [] } });
       }
 
+      if (name === "profile") {
+      const user = interaction.options.getUser("user") || interaction.user;
+      await safeDefer(interaction, false);
+
+      const guild = interaction.guild;
+      if (!guild) return safeReply(interaction, { content: "Command ini cuma bisa dipakai di server ya." });
+
+      const member = await guild.members.fetch(user.id).catch(() => null);
+
+      const { embed, idData, sorted, afk } = await buildProfileEmbed({ guild, user, member });
+
+      const row = profileButtons({
+        hasIdCard: Boolean(idData),
+        hasSorted: Boolean(sorted?.choice),
+        isAfk: Boolean(afk),
+      });
+
+      return safeReply(interaction, { embeds: [embed], components: [row], allowedMentions: { parse: [] } });
+    }
+
+    //serverinfo
+      if (name === "serverinfo") {
+        await safeDefer(interaction, false); // <- bukan ephemeral
+
+        const g = interaction.guild;
+        if (!g) return safeReply(interaction, { content: "Command ini cuma bisa dipakai di server ya.", flags: MessageFlags.Ephemeral });
+
+        // fetch data
+        const owner = await g.fetchOwner().catch(() => null);
+        const channels = await g.channels.fetch().catch(() => null);
+
+        // counts
+        const totalMembers = g.memberCount ?? 0;
+
+        const channelCount = channels ? channels.size : 0;
+        const textCount = channels ? channels.filter((c) => c?.type === 0).size : 0; // GuildText
+        const voiceCount = channels ? channels.filter((c) => c?.type === 2).size : 0; // GuildVoice
+        const categoryCount = channels ? channels.filter((c) => c?.type === 4).size : 0; // GuildCategory
+        const forumCount = channels ? channels.filter((c) => c?.type === 15).size : 0; // GuildForum
+        const stageCount = channels ? channels.filter((c) => c?.type === 13).size : 0; // GuildStageVoice
+        const threadCount = channels ? channels.filter((c) => [11, 12].includes(c?.type)).size : 0; // Public/Private thread (may not appear depending fetch)
+
+        const roleCount = g.roles?.cache?.size ? Math.max(0, g.roles.cache.size - 1) : 0; // minus @everyone
+
+        // boosts
+        const boostTier = g.premiumTier ?? 0;
+        const boostCount = g.premiumSubscriptionCount ?? 0;
+
+        // verification level label (Discord enum)
+        const verMap = {
+          0: "🔓 None",
+          1: "🪶 Low",
+          2: "🛡️ Medium",
+          3: "🔒 High",
+          4: "👑 Very High",
+        };
+        const verLabel = verMap[g.verificationLevel] || `Level ${g.verificationLevel ?? "—"}`;
+
+        // created
+        const createdUnix = Math.floor((g.createdTimestamp || Date.now()) / 1000);
+
+        // aesthetics
+        const icon = g.iconURL({ extension: "png", size: 512 });
+        const banner = g.bannerURL?.({ extension: "png", size: 1024 }) || null;
+
+        const embed = new EmbedBuilder()
+          .setTitle("🏛️ Mystral Academy — Realm Dossier")
+          .setColor(EMBED_COLOR)
+          .setThumbnail(icon)
+          .setDescription(
+            [
+              `**Realm:** **${g.name}**`,
+              `**Realm ID:** \`${g.id}\``,
+              owner ? `**Ownership:** <@${owner.id}>` : `**Sovereign:** —`,
+            ].join("\n")
+          )
+          .addFields(
+            {
+              name: "🧭 Population",
+              value: [
+                `**Members:** **${totalMembers.toLocaleString("id-ID")}**`,
+                `**Boosts:** **${boostCount.toLocaleString("id-ID")}**`,
+                `**Boost Tier:** **${boostTier}**`,
+              ].join("\n"),
+              inline: true,
+            },
+            {
+              name: "🗺️ Channels",
+              value: channels
+                ? [
+                    `**Total:** **${channelCount}**`,
+                    `💬 Text: ${textCount}`,
+                    `🔊 Voice: ${voiceCount}`,
+                    `🗂️ Category: ${categoryCount}`,
+                    `🧵 Threads: ${threadCount}`,
+                    `🧷 Forum: ${forumCount}`,
+                    `🎙️ Stage: ${stageCount}`,
+                  ].join("\n")
+                : "⚠️ tidak bisa fetch channel (izin kurang / error).",
+              inline: true,
+            },
+            {
+              name: "🎭 Structure",
+              value: [
+                `**Roles:** **${roleCount}**`,
+                `**Verification:** ${verLabel}`,
+                `**Created:** <t:${createdUnix}:F>`,
+                `**Age:** <t:${createdUnix}:R>`,
+              ].join("\n"),
+              inline: false,
+            }
+          )
+          .setFooter({ text: `${BRAND_NAME} • Student Registry` })
+          .setTimestamp();
+
+        if (banner) embed.setImage(banner);
+
+        return safeReply(interaction, { embeds: [embed], allowedMentions: { parse: [] } });
+      }
+
+      //afk
+      if (name === "afk") {
+        const reason = interaction.options.getString("reason") || "AFK";
+        await setAfk(interaction.user.id, reason);
+
+        // set nickname jadi [AFK] ...
+        const member = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
+        if (member) {
+          const base = member.nickname || interaction.user.username;
+          await trySetMemberNick(member, withAfkPrefix(base));
+        }
+
+        return safeReply(interaction, {
+          content: `🕯️ <@${interaction.user.id}> kini berstatus **AFK** — ${safeText(reason, 80)}`,
+          allowedMentions: { repliedUser: false, parse: [] },
+        });
+      }
+
+      //registry
+      if (name === "registry") {
+        if (!interaction.guild) return safeReply(interaction, { content: "Command ini cuma bisa dipakai di server ya.", flags: MessageFlags.Ephemeral });
+
+        const total = await countRegistry();
+        const pageSize = 10;
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+        const pageIndex = 0;
+
+        const rows = await registryPage(pageIndex * pageSize, pageSize);
+        const embed = registryEmbed(pageIndex, totalPages, total, rows);
+        const row = registryRow(pageIndex, totalPages);
+
+        return safeReply(interaction, { embeds: [embed], components: [row], allowedMentions: { parse: [] } });
+      }
+
+      // OWNER ONLY
+      if (name === "menfesspanel") {
+        if (!isBotOwner(interaction.user.id)) {
+          return safeReply(interaction, { content: "❌ command ini cuma buat pembuat bot.", flags: MessageFlags.Ephemeral });
+        }
+
+        const ch = await getTextChannelOrNull(interaction.guild, requireEnv("MENFESS_CHANNEL_ID"));
+        if (!ch) {
+          return safeReply(interaction, { content: "⚠️ MENFESS_CHANNEL_ID tidak ketemu / bot tidak punya akses / bukan text channel.", flags: MessageFlags.Ephemeral });
+        }
+
+        await ch.send({ embeds: [menfessPanelEmbed()], components: [menfessPanelRow()], allowedMentions: { parse: [] } });
+        return safeReply(interaction, { content: "✅ panel menfess terkirim ke channel menfess.", flags: MessageFlags.Ephemeral });
+      }
+
+      // OWNER ONLY
+      if (name === "sortingpanel") {
+        if (!isBotOwner(interaction.user.id)) {
+          return safeReply(interaction, { content: "❌ command ini cuma buat pembuat bot.", flags: MessageFlags.Ephemeral });
+        }
+
+        const targetChannelId = requireEnv("SORTING_CHANNEL_ID") || interaction.channelId;
+        const ch = await getTextChannelOrNull(interaction.guild, targetChannelId);
+        if (!ch) {
+          return safeReply(interaction, { content: "⚠️ SORTING_CHANNEL_ID tidak valid / bot tidak punya akses / bukan text channel.", flags: MessageFlags.Ephemeral });
+        }
+
+        await ch.send({ embeds: [sortingPanelEmbed()], components: [sortingPanelRow()], allowedMentions: { parse: [] } });
+        return safeReply(interaction, { content: "✅ panel sorting terkirim.", flags: MessageFlags.Ephemeral });
+      }
+
+      // OWNER ONLY
       if (name === "idcard") {
+        if (!isBotOwner(interaction.user.id)) {
+          return safeReply(interaction, { content: "❌ fitur ID Card ini dikunci (khusus pembuat bot).", flags: MessageFlags.Ephemeral });
+        }
+
         const embed = new EmbedBuilder()
           .setTitle(`🪪 ${ID_CARD_TITLE}`)
           .setColor(EMBED_COLOR)
-          .setDescription("Klik tombol untuk membuat / update **HOV IDENTITY CARD** kamu.")
+          .setDescription("Klik tombol untuk membuat / update **MYSTRAL IDENTITY CARD** kamu.")
           .setFooter({ text: "Theme: isi Status pakai `| dark` atau `| light` (contoh: single | dark)" });
 
         const row = new ActionRowBuilder().addComponents(
@@ -1051,59 +2762,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return safeReply(interaction, { embeds: [embed], components: [row] });
       }
 
-      if (name === "sortingpanel") {
-        if (!interaction.inGuild()) {
-          return safeReply(interaction, {
-            content: "⚠️ Command ini harus dipakai di server (bukan DM/App chat).",
-            flags: InteractionResponseFlags.Ephemeral,
-          });
-        }
-
-        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          return safeReply(interaction, { content: "command ini cuma buat admin ya 👀", flags: InteractionResponseFlags.Ephemeral });
-        }
-
-        const targetChannelId = requireEnv("SORTING_CHANNEL_ID") || interaction.channelId;
-        const res = await getTextChannelOrExplain(interaction.guild, targetChannelId);
-        if (!res.ok) {
-          return safeReply(interaction, {
-            content: `⚠️ Sorting panel gagal: ${explainChannelError(res)}`,
-            flags: InteractionResponseFlags.Ephemeral,
-          });
-        }
-
-        await res.channel.send({ embeds: [sortingPanelEmbed()], components: [sortingPanelRow()], allowedMentions: { parse: [] } });
-        return safeReply(interaction, { content: "✅ panel sorting terkirim.", flags: InteractionResponseFlags.Ephemeral });
-      }
-
-      // /myhouse
       if (name === "myhouse") {
-        if (!interaction.guild) {
-          return safeReply(interaction, { content: "Command ini cuma bisa dipakai di server ya.", flags: InteractionResponseFlags.Ephemeral });
-        }
+        if (!interaction.guild) return safeReply(interaction, { content: "Command ini cuma bisa dipakai di server ya.", flags: 0 });
 
         const targetUser = interaction.options.getUser("user") || interaction.user;
 
-        const sorted = getSortedUser(targetUser.id);
+        const sorted = await getSortedUser(targetUser.id);
         if (!sorted?.choice) {
-          return safeReply(interaction, {
-            content: `⚠️ ${targetUser.id === interaction.user.id ? "Kamu" : `<@${targetUser.id}>`} belum melakukan Arcane Sorting.`,
-            allowedMentions: { parse: [] },
-          });
+          return safeReply(interaction, { content: `⚠️ ${targetUser.id === interaction.user.id ? "Kamu" : `<@${targetUser.id}>`} belum melakukan Arcane Sorting.`, allowedMentions: { parse: [] } });
         }
 
-        const idDb = loadIdDB();
-        const idData = idDb.users?.[targetUser.id];
+        const idData = await getIdCard(targetUser.id);
         if (!idData) {
           const idCh = requireEnv("IDCARD_CHANNEL_ID");
           const mention = idCh ? `<#${idCh}>` : "channel ID Card";
-          return safeReply(interaction, {
-            content: `⚠️ ${targetUser.id === interaction.user.id ? "Kamu" : `<@${targetUser.id}>`} belum punya **Valerie ID Card**.\nBuat dulu di ${mention} dengan **/idcard**.`,
-            allowedMentions: { parse: [] },
-          });
+          return safeReply(interaction, { content: `⚠️ ${targetUser.id === interaction.user.id ? "Kamu" : `<@${targetUser.id}>`} belum punya **Mystral Academy ID Card**.\nSilahkan buat dulu di ${mention} dengan command **/idcard**.`, allowedMentions: { parse: [] } });
         }
 
-        await safeDeferReply(interaction, { ephemeral: false });
+        await safeDefer(interaction, false);
 
         const png = await renderHouseCard({
           choice: sorted.choice,
@@ -1117,152 +2793,142 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const file = new AttachmentBuilder(png, { name: filename });
 
         const embed = new EmbedBuilder()
-          .setTitle("🪪 Valerie House Card")
+          .setTitle("🪪 Mystral Academy Card")
           .setColor(EMBED_COLOR)
           .setDescription(
             [
               `**Member:** <@${targetUser.id}>`,
-              `**Arcane:** ${
-                sorted.choice === "dark"
-                  ? "<:dark:1452229004663849052> Dark Arcana"
-                  : "<:light:1452229058841542748> Light Arcana"
-              }`,
+              `**Student:** ${sorted.choice === "dark" ? "<:dark:1459543141609771101> Dark Arcane" : "<:light:1459543076736336004> Light Arcane"}`,
             ].join("\n")
           )
           .setImage(`attachment://${filename}`)
-          .setFooter({ text: "House of Valerie • Arcane Registry" })
+          .setFooter({ text: "Mystral Academy • Student Registry" })
           .setTimestamp();
 
         return safeReply(interaction, { embeds: [embed], files: [file], allowedMentions: { parse: [] } });
       }
-
-      return;
     }
 
     // ===================== BUTTONS =====================
     if (interaction.isButton()) {
       const id = interaction.customId;
 
-      // registry pagination
       if (id.startsWith("registry:")) {
         await safeDeferUpdate(interaction);
 
         const [, action, currentStr] = id.split(":");
         const current = Number(currentStr || 0);
 
-        await interaction.guild.members.fetch({ withPresences: false }).catch(() => null);
-
-        const idDb = loadIdDB();
-        const pages = buildRegistryPages(interaction.guild, idDb);
+        const total = await countRegistry();
+        const pageSize = 10;
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
         let nextPage = current;
         if (action === "prev") nextPage = Math.max(0, current - 1);
-        if (action === "next") nextPage = Math.min(pages.length - 1, current + 1);
+        if (action === "next") nextPage = Math.min(totalPages - 1, current + 1);
 
-        const embed = registryEmbed(interaction.guild, pages, nextPage);
-        const row = registryRow(nextPage, pages.length);
+        const rows = await registryPage(nextPage * pageSize, pageSize);
+        const embed = registryEmbed(nextPage, totalPages, total, rows);
+        const row = registryRow(nextPage, totalPages);
 
         return interaction.message.edit({ embeds: [embed], components: [row], allowedMentions: { parse: [] } });
       }
 
-      // sorting
-      if (id === "sorting:roll") {
-        if (!interaction.inGuild()) {
-          return safeReply(interaction, {
-            content: "⚠️ Sorting hanya bisa dipakai di server (bukan DM/App chat).",
-            flags: InteractionResponseFlags.Ephemeral,
-          });
-        }
+ if (id.startsWith("profile:")) {
+  const guild = interaction.guild;
+  if (!guild) {
+    return safeReply(interaction, { content: "Command ini cuma bisa dipakai di server ya.", flags: MessageFlags.Ephemeral });
+  }
 
-        const lightRoleId = requireEnv("LIGHT_ROLE_ID");
-        const darkRoleId = requireEnv("DARK_ROLE_ID");
-        const idcardChannelId = requireEnv("IDCARD_CHANNEL_ID");
+  const targetUser = interaction.user; // tombol dipencet oleh siapa
 
-        if (!lightRoleId || !darkRoleId) {
-          return safeReply(interaction, {
-            content: `⚠️ LIGHT_ROLE_ID / DARK_ROLE_ID kosong.\n(light=${String(lightRoleId)} dark=${String(darkRoleId)})`,
-            flags: InteractionResponseFlags.Ephemeral,
-          });
-        }
+  // ✅ MODAL HARUS DIDAHULUKAN (JANGAN DEFER SEBELUM showModal)
+  if (id === "profile:afk_set") {
+    const cur = await getAfk(targetUser.id).catch(() => null);
+    const modal = buildProfileAfkModal(cur?.reason || "AFK");
+    return interaction.showModal(modal);
+  }
 
-        const rLight = await getRoleOrExplain(interaction.guild, lightRoleId);
-        const rDark = await getRoleOrExplain(interaction.guild, darkRoleId);
-        if (!rLight.ok || !rDark.ok) {
-          const msg = [
-            "⚠️ Role Sorting bermasalah:",
-            !rLight.ok ? `• Light: ${explainRoleError(rLight)}` : null,
-            !rDark.ok ? `• Dark: ${explainRoleError(rDark)}` : null,
-            "",
-            "Biasanya: role ID dari server lain / role lama kehapus lalu dibuat ulang.",
-          ]
-            .filter(Boolean)
-            .join("\n");
-          return safeReply(interaction, { content: msg, flags: InteractionResponseFlags.Ephemeral });
-        }
+  // selain modal: baru defer
+  await safeDefer(interaction, true);
 
-        const locked = getSortedUser(interaction.user.id);
-        if (locked) {
-          const when = Math.floor((locked.at || Date.now()) / 1000);
-          const text =
-            locked.choice === "light"
-              ? "<:light:1452229058841542748> Light Arcana"
-              : "<:dark:1452229004663849052> Dark Arcana";
-          return safeReply(interaction, {
-            content: `🔒 Kamu sudah tersortir ke **${text}**.\nSejak: <t:${when}:F>\n\nTidak bisa sorting ulang.`,
-            flags: InteractionResponseFlags.Ephemeral,
-          });
-        }
+  if (id === "profile:afk_clear") {
+    const ok = await clearAfk(targetUser.id).catch(() => false);
 
-        const idDb = loadIdDB();
-        const idData = idDb.users?.[interaction.user.id];
-        if (!idData) {
-          const mention = idcardChannelId ? `<#${idcardChannelId}>` : "channel ID Card";
-          return safeReply(interaction, {
-            content:
-              `⚠️ Kamu belum buat **Valerie ID Card**.\n` +
-              `Buat dulu di ${mention} dengan command **/idcard**.\n\n` +
-              `Setelah itu balik lagi dan klik **Mulai Ritual**.`,
-            flags: InteractionResponseFlags.Ephemeral,
-          });
-        }
+    // balikin nickname (hapus prefix [AFK]) kalau bisa
+    const member = await guild.members.fetch(targetUser.id).catch(() => null);
+    if (member) {
+      const current = member.nickname || targetUser.username;
+      const restored = stripAfkPrefix(current);
+      await trySetMemberNick(member, restored || null);
+    }
 
-        await safeDeferReply(interaction, { flags: InteractionResponseFlags.Ephemeral });
+    return interaction.editReply(ok ? "✅ AFK kamu sudah dihapus." : "⚠️ Kamu memang tidak sedang AFK.");
+  }
 
-        const stages = [
-          "🕯️ Lingkaran arcane menyala…",
-          "🔮 Aura kamu dibaca oleh Arcana…",
-          "✨ Fragmen takdir berputar di udara…",
-          "🌙 Tirai antara cahaya & bayangan menipis…",
-          "📜 Keputusan hampir ditetapkan…",
-        ];
-        for (const s of stages) {
-          await interaction.editReply({ content: s }).catch(() => {});
-          await sleep(850);
-        }
+  if (id === "profile:view_idcard") {
+    const idData = await getIdCard(targetUser.id).catch(() => null);
+    if (!idData) return interaction.editReply("⚠️ Kamu belum punya ID Card.");
 
-        const choice = Math.random() < 0.5 ? "light" : "dark";
-        setSortedUser(interaction.user.id, choice);
+    const sorted = await getSortedUser(targetUser.id).catch(() => null);
+    const arcanaChoice = sorted?.choice || null;
 
-        const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
-        if (!member) return interaction.editReply({ content: "⚠️ Gagal fetch member." });
+    const createdAtText = formatIdDate(Number(idData.created_at) || Date.now());
 
-        const roleIdToAdd = choice === "light" ? lightRoleId : darkRoleId;
-        await member.roles.add(roleIdToAdd).catch((e) => console.error("[SORTING] add role failed:", e));
+    const png = await renderIdCard({
+      theme: (idData.theme || "light") === "dark" ? "dark" : "light",
+      number: idData.number || "—",
+      name: idData.name || targetUser.username,
+      gender: idData.gender || "—",
+      domisili: idData.domisili || "—",
+      hobi: idData.hobi || "—",
+      status: idData.status || "—",
+      avatarUrl: targetUser.displayAvatarURL({ extension: "png", size: 256 }),
+      createdAtText,
+      arcanaChoice,
+    });
 
-        const finalText =
-          choice === "light"
-            ? "<:light:1452229058841542748> **LIGHT ARCANE**"
-            : "<:dark:1452229004663849052> **DARK ARCANE**";
+    const file = new AttachmentBuilder(png, { name: "mystral_idcard.png" });
 
-        await interaction.editReply({
-          content: `<:witch:1452256560108666977> Arcane telah memutuskan...\nKamu masuk ke ${finalText}!\n\n📨 House Card kamu dikirim ke channel hasil.\n🔒 Ritual terkunci (1x saja).`,
-        });
+    const embed = new EmbedBuilder()
+      .setTitle("🪪 Mystral ID Card")
+      .setColor(EMBED_COLOR)
+      .setImage("attachment://mystral_idcard.png")
+      .setTimestamp();
 
-        await postHouseCard(interaction.guild, interaction.user, choice).catch((e) => console.error("[HOUSECARD] send failed:", e));
-        return;
-      }
+    return interaction.editReply({ embeds: [embed], files: [file], allowedMentions: { parse: [] } });
+  }
 
-      // menfess open modal
+  if (id === "profile:view_house") {
+    const sorted = await getSortedUser(targetUser.id).catch(() => null);
+    if (!sorted?.choice) return interaction.editReply("⚠️ Kamu belum melakukan Student Sorting.");
+
+    const idData = await getIdCard(targetUser.id).catch(() => null);
+    if (!idData) return interaction.editReply("⚠️ Kamu belum punya ID Card.");
+
+    const png = await renderHouseCard({
+      choice: sorted.choice,
+      name: idData.name || targetUser.username,
+      gender: idData.gender || "—",
+      hovId: idData.number || "—",
+      avatarUrl: targetUser.displayAvatarURL({ extension: "png", size: 256 }),
+    });
+
+    const file = new AttachmentBuilder(png, { name: "mystral_housecard.png" });
+
+    const embed = new EmbedBuilder()
+      .setTitle("🏰 Mystral Student Card")
+      .setColor(EMBED_COLOR)
+      .setImage("attachment://mystral_housecard.png")
+      .setTimestamp();
+
+    return interaction.editReply({ embeds: [embed], files: [file], allowedMentions: { parse: [] } });
+  }
+
+  // kalau customId profile lain masuk, biar gak silent
+  return interaction.editReply("⚠️ tombol profile ini belum punya handler.");
+}
+ 
       if (id === "menfess:new") {
         const cdSec = Number(process.env.MENFESS_COOLDOWN_SEC || 60);
         const now = Date.now();
@@ -1270,7 +2936,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         if (now - last < cdSec * 1000) {
           const wait = Math.ceil((cdSec * 1000 - (now - last)) / 1000);
-          return safeReply(interaction, { content: `⏳ tunggu ${wait}s dulu ya.`, flags: InteractionResponseFlags.Ephemeral });
+          return safeReply(interaction, { content: `⏳ tunggu ${wait}s dulu ya.`, flags: MessageFlags.Ephemeral });
         }
 
         const modal = new ModalBuilder().setCustomId("menfess:submit").setTitle("✉️ Menfess Anon");
@@ -1282,13 +2948,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setMaxLength(12)
           .setRequired(true);
 
-        const aliasInput = new TextInputBuilder()
-          .setCustomId("alias")
-          .setLabel("Nama (opsional)")
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(24)
-          .setRequired(false);
-
         const msgInput = new TextInputBuilder()
           .setCustomId("msg")
           .setLabel("Isi menfess")
@@ -1296,22 +2955,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setMaxLength(1500)
           .setRequired(true);
 
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(toInput),
-          new ActionRowBuilder().addComponents(aliasInput),
-          new ActionRowBuilder().addComponents(msgInput)
-        );
-
-        return safeShowModal(interaction, modal);
+        modal.addComponents(new ActionRowBuilder().addComponents(toInput), new ActionRowBuilder().addComponents(msgInput));
+        return interaction.showModal(modal);
       }
 
-      // menfess reply open modal
       if (id.startsWith("menfess:reply:")) {
         const menfessId = id.split(":")[2];
-
-        const modal = new ModalBuilder()
-          .setCustomId(`menfess:reply_submit:${menfessId}`)
-          .setTitle(`🫣 Balas Anonim #${menfessId}`);
+        const modal = new ModalBuilder().setCustomId(`menfess:reply_submit:${menfessId}`).setTitle(`🫣 Balas Anonim #${menfessId}`);
 
         const reply = new TextInputBuilder()
           .setCustomId("reply_msg")
@@ -1321,47 +2971,134 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setRequired(true);
 
         modal.addComponents(new ActionRowBuilder().addComponents(reply));
-        return safeShowModal(interaction, modal);
+        return interaction.showModal(modal);
       }
+
+      //modal ticket
+      if (id.startsWith("ticket:open:")) {
+      const type = id.split(":")[2]; // complaint / report
+      const label = type === "report" ? "Report" : "Keluhan";
+
+      const modal = new ModalBuilder()
+        .setCustomId(`ticket:submit:${type}`)
+        .setTitle(`🎫 ${label} — Mystral Academy`);
+
+      const subject = new TextInputBuilder()
+        .setCustomId("subject")
+        .setLabel("Judul Singkat")
+        .setStyle(TextInputStyle.Short)
+        .setMaxLength(60)
+        .setRequired(true);
+
+      const detail = new TextInputBuilder()
+        .setCustomId("detail")
+        .setLabel("Kronologi / Detail")
+        .setStyle(TextInputStyle.Paragraph)
+        .setMaxLength(1500)
+        .setRequired(true);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(subject),
+        new ActionRowBuilder().addComponents(detail)
+      );
+
+      return interaction.showModal(modal);
+    }
+
+    if (id === "ticket:claim") {
+  await safeDefer(interaction, true);
+
+  const guild = interaction.guild;
+  const ch = interaction.channel;
+  if (!guild || !ch?.name?.startsWith("ticket-")) return interaction.editReply("⚠️ ini bukan channel ticket.");
+
+  if (!ticketIsStaff(interaction.member)) {
+    return interaction.editReply("❌ hanya staff yang bisa claim ticket.");
+  }
+
+  const already = getClaimedFromTopic(ch.topic);
+  if (already) {
+    return interaction.editReply(`🔒 ticket ini sudah di-claim oleh <@${already}>.`);
+  }
+
+  await ch.setTopic(setClaimedTopic(ch.topic || "", interaction.user.id)).catch(() => {});
+  await ch.send(`🧠 Ticket ini di-claim oleh <@${interaction.user.id}>. *(handled by staff)*`).catch(() => {});
+
+  const logCh = await getTicketLogChannel(guild);
+  if (logCh) {
+    const logEmbed = new EmbedBuilder()
+      .setTitle("🧠 Ticket Claimed")
+      .setColor(EMBED_COLOR)
+      .setDescription([`**Channel:** ${ch}`, `**Claimed by:** <@${interaction.user.id}> (${interaction.user.tag})`].join("\n"))
+      .setTimestamp();
+    await logCh.send({ embeds: [logEmbed], allowedMentions: { parse: [] } }).catch(() => {});
+  }
+
+  return interaction.editReply("✅ ticket berhasil kamu claim.");
+}
+
+if (id === "ticket:close") {
+  await safeDefer(interaction, true);
+
+  const guild = interaction.guild;
+  const ch = interaction.channel;
+  if (!guild || !ch?.name?.startsWith("ticket-")) return interaction.editReply("⚠️ ini bukan channel ticket.");
+
+  if (!ticketIsStaff(interaction.member)) {
+    return interaction.editReply("❌ hanya staff yang bisa menutup ticket.");
+  }
+
+  const logCh = await getTicketLogChannel(guild);
+  const claimedBy = getClaimedFromTopic(ch.topic);
+  const ownerId = getTicketOwnerIdFromTopic(ch.topic);
+  const type = getTicketTypeFromTopic(ch.topic);
+
+  // buat transcript
+  try {
+    const { txtBuffer, htmlBuffer, count } = await buildTicketTranscript(ch);
+
+    if (logCh) {
+      const files = [
+        new AttachmentBuilder(txtBuffer, { name: `${ch.name}_transcript.txt` }),
+        new AttachmentBuilder(htmlBuffer, { name: `${ch.name}_transcript.html` }),
+      ];
+
+      const logEmbed = new EmbedBuilder()
+        .setTitle("📦 Ticket Closed + Transcript")
+        .setColor(0xffc107)
+        .setDescription(
+          [
+            `**Channel:** #${ch.name}`,
+            `**Type:** ${String(type || "—").toUpperCase()}`,
+            ownerId ? `**Owner:** <@${ownerId}>` : `**Owner:** —`,
+            claimedBy ? `**Claimed by:** <@${claimedBy}>` : `**Claimed by:** —`,
+            `**Closed by:** <@${interaction.user.id}> (${interaction.user.tag})`,
+            `**Messages exported:** ${count}`,
+          ].join("\n")
+        )
+        .setTimestamp();
+
+      await logCh.send({ embeds: [logEmbed], files, allowedMentions: { parse: [] } }).catch(() => {});
+    }
+  } catch (e) {
+    console.error("[TICKET] transcript failed:", e?.message || e);
+  }
+
+  await ch.send("🔒 Ticket akan ditutup dalam 5 detik...").catch(() => {});
+  setTimeout(() => ch.delete().catch(() => {}), 5000);
+
+  return interaction.editReply(`✅ ticket ditutup. ${logCh ? "Transcript dikirim ke log staff." : ""}`);
+}
 
       // idcard open modal
       if (id === "idcard:open") {
         const modal = new ModalBuilder().setCustomId("idcard:submit").setTitle(`🪪 ${ID_CARD_TITLE}`);
 
-        const nameInput = new TextInputBuilder()
-          .setCustomId("name")
-          .setLabel("Nama")
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(24)
-          .setRequired(true);
-
-        const genderInput = new TextInputBuilder()
-          .setCustomId("gender")
-          .setLabel("Gender (L / P / W / dll)")
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(8)
-          .setRequired(true);
-
-        const domInput = new TextInputBuilder()
-          .setCustomId("dom")
-          .setLabel("Domisili")
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(24)
-          .setRequired(true);
-
-        const hobiInput = new TextInputBuilder()
-          .setCustomId("hobi")
-          .setLabel("Hobi")
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(30)
-          .setRequired(true);
-
-        const statusInput = new TextInputBuilder()
-          .setCustomId("status")
-          .setLabel("Status + Theme (contoh: single | dark/light)")
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(32)
-          .setRequired(true);
+        const nameInput = new TextInputBuilder().setCustomId("name").setLabel("Nama").setStyle(TextInputStyle.Short).setMaxLength(24).setRequired(true);
+        const genderInput = new TextInputBuilder().setCustomId("gender").setLabel("Gender (L / P / W / dll)").setStyle(TextInputStyle.Short).setMaxLength(8).setRequired(true);
+        const domInput = new TextInputBuilder().setCustomId("dom").setLabel("Domisili").setStyle(TextInputStyle.Short).setMaxLength(24).setRequired(true);
+        const hobiInput = new TextInputBuilder().setCustomId("hobi").setLabel("Hobi").setStyle(TextInputStyle.Short).setMaxLength(30).setRequired(true);
+        const statusInput = new TextInputBuilder().setCustomId("status").setLabel("Status + Theme (contoh: single | dark/light)").setStyle(TextInputStyle.Short).setMaxLength(32).setRequired(true);
 
         modal.addComponents(
           new ActionRowBuilder().addComponents(nameInput),
@@ -1371,68 +3108,125 @@ client.on(Events.InteractionCreate, async (interaction) => {
           new ActionRowBuilder().addComponents(statusInput)
         );
 
-        return safeShowModal(interaction, modal);
+        return interaction.showModal(modal);
       }
 
-      return;
+      // sorting roll
+      if (id === "sorting:roll") {
+        const EMOJI_LIGHT = process.env.LIGHT_EMOJI || "<:light:1459543076736336004>";
+        const EMOJI_DARK = process.env.DARK_EMOJI || "<:dark:1459543141609771101>";
+
+        const lightRoleId = requireEnv("LIGHT_ROLE_ID");
+        const darkRoleId = requireEnv("DARK_ROLE_ID");
+        const idcardChannelId = requireEnv("IDCARD_CHANNEL_ID");
+
+        if (!lightRoleId || !darkRoleId) {
+          return safeReply(interaction, { content: "⚠️ LIGHT_ROLE_ID / DARK_ROLE_ID belum diisi di .env", flags: MessageFlags.Ephemeral });
+        }
+
+        const rLight = await getRoleOrNull(interaction.guild, lightRoleId);
+        const rDark = await getRoleOrNull(interaction.guild, darkRoleId);
+        if (!rLight || !rDark) {
+          return safeReply(interaction, { content: "⚠️ Role sorting tidak ditemukan. Update ROLE_ID di .env.", flags: MessageFlags.Ephemeral });
+        }
+
+        const locked = await getSortedUser(interaction.user.id);
+        if (locked?.choice) {
+          const when = Math.floor((Number(locked.at) || Date.now()) / 1000);
+          const text = locked.choice === "light" ? `${EMOJI_LIGHT} Light Student` : `${EMOJI_DARK} Dark Student`;
+          return safeReply(interaction, { content: `🔒 Kamu sudah tersortir ke **${text}**.\nSejak: <t:${when}:F>\n\nTidak bisa sorting ulang.`, flags: MessageFlags.Ephemeral });
+        }
+
+        const idData = await getIdCard(interaction.user.id);
+        if (!idData) {
+          const mention = idcardChannelId ? `<#${idcardChannelId}>` : "channel ID Card";
+          return safeReply(interaction, {
+            content: `⚠️ Kamu belum buat **Mystral Academy ID Card**.\nSilahkan buat dulu di ${mention} dengan command **/idcard**.\n\nSetelah itu balik lagi dan klik **Mulai Ritual**.`,
+            flags: MessageFlags.Ephemeral,
+            allowedMentions: { parse: [] },
+          });
+        }
+
+        await safeDefer(interaction, true);
+
+        const stages = [
+          "🕯️ Lingkaran arcane menyala…",
+          "🔮 Aura kamu dibaca oleh Arcane…",
+          "✨ Fragmen takdir berputar di udara…",
+          "🌙 Tirai antara cahaya & bayangan menipis…",
+          "📜 Keputusan hampir ditetapkan…",
+        ];
+        for (const s of stages) {
+          await interaction.editReply({ content: s });
+          await sleep(850);
+        }
+
+        const choice = await pickChoiceBagMoreNatural();
+        await setSortedUser(interaction.user.id, choice);
+
+        const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+        if (!member) return interaction.editReply({ content: "⚠️ Gagal fetch member." });
+
+        const roleIdToAdd = choice === "light" ? lightRoleId : darkRoleId;
+        await member.roles.add(roleIdToAdd).catch((e) => console.error("[SORTING] add role failed:", e));
+
+        const finalText = choice === "light" ? `${EMOJI_LIGHT} **LIGHT STUDENT**` : `${EMOJI_DARK} **DARK STUDENT**`;
+
+        await postHouseCard(interaction.guild, interaction.user, choice).catch((e) => console.error("[HOUSECARD] send failed:", e));
+
+        return interaction.editReply({ content: `📜 Takdir ditetapkan: ${finalText}` });
+      }
     }
 
     // ===================== MODALS =====================
     if (interaction.isModalSubmit()) {
       const id = interaction.customId;
 
-      // menfess submit
-      if (id === "menfess:submit") {
-        if (!interaction.inGuild()) {
-          return safeReply(interaction, {
-            content: "⚠️ Menfess hanya bisa dipakai di server (bukan DM/App chat).",
-            flags: InteractionResponseFlags.Ephemeral,
-          });
-        }
+      if (id === "profile:afk_submit") {
+      await safeDefer(interaction, true);
 
-        const res = await getTextChannelOrExplain(interaction.guild, requireEnv("MENFESS_CHANNEL_ID"));
-        if (!res.ok) {
-          return safeReply(interaction, {
-            content: `⚠️ Menfess gagal: ${explainChannelError(res)}`,
-            flags: InteractionResponseFlags.Ephemeral,
-          });
-        }
-        const ch = res.channel;
+      const reason = interaction.fields.getTextInputValue("reason") || "AFK";
+      await setAfk(interaction.user.id, reason);
+
+      // set nickname jadi [AFK] ...
+      const member = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
+      if (member) {
+        const base = member.nickname || interaction.user.username;
+        await trySetMemberNick(member, withAfkPrefix(base));
+      }
+
+      return interaction.editReply(`🕯️ kamu sekarang AFK — **${safeText(reason, 80)}**`);
+    }
+
+      if (id === "menfess:submit") {
+        const ch = await getTextChannelOrNull(interaction.guild, requireEnv("MENFESS_CHANNEL_ID"));
+        if (!ch) return safeReply(interaction, { content: "Channel menfess tidak ketemu / bot tidak punya akses.", flags: MessageFlags.Ephemeral });
 
         const to = interaction.fields.getTextInputValue("to_initial").trim();
-        const aliasRaw = (interaction.fields.getTextInputValue("alias") || "").trim();
         const content = interaction.fields.getTextInputValue("msg").trim();
 
-        if (!to || !content) {
-          return safeReply(interaction, { content: "Form kosong 😭", flags: InteractionResponseFlags.Ephemeral });
-        }
-        if (aliasRaw && isBadAlias(aliasRaw)) {
-          return safeReply(interaction, {
-            content: "Nama tidak boleh mengandung mention / nyamar staff ya.",
-            flags: InteractionResponseFlags.Ephemeral,
-          });
-        }
+        if (!to || !content) return safeReply(interaction, { content: "Form kosong 😭", flags: MessageFlags.Ephemeral });
+        if (isBadAlias(to)) return safeReply(interaction, { content: "⚠️ Bagian 'Untuk' jangan pakai mention / tag ya.", flags: MessageFlags.Ephemeral });
 
         const cdSec = Number(process.env.MENFESS_COOLDOWN_SEC || 60);
         const now = Date.now();
         const last = menfessCooldown.get(interaction.user.id) || 0;
         if (now - last < cdSec * 1000) {
           const wait = Math.ceil((cdSec * 1000 - (now - last)) / 1000);
-          return safeReply(interaction, { content: `⏳ tunggu ${wait}s dulu ya.`, flags: InteractionResponseFlags.Ephemeral });
+          return safeReply(interaction, { content: `⏳ tunggu ${wait}s dulu ya.`, flags: MessageFlags.Ephemeral });
         }
         menfessCooldown.set(interaction.user.id, now);
 
-        const db = loadMenfessDB();
-        const menfessId = ++db.lastId;
+        const senderLabel = "Pengirim Anonymous";
+        const menfessId = await nextMenfessId();
 
-        const anonDefault = getAnonLabel(db, interaction.user.id);
-        const senderLabel = aliasRaw ? aliasRaw : anonDefault;
-        saveMenfessDB(db);
+        await insertMenfessPost({ id: menfessId, messageId: null, channelId: ch.id });
+        await getAnonLabel(interaction.user.id);
 
         const embed = new EmbedBuilder()
           .setTitle(`🕯️ MENFESS #${menfessId}`)
           .setColor(EMBED_COLOR)
-          .setDescription(`**untuk:** ${safeText(to, 24)}\n\n${content}\n\n— **${safeText(senderLabel, 24)}**`)
+          .setDescription(`**untuk:** ${safeText(to, 24)}\n\n${content}\n\n— **${senderLabel}**`)
           .setFooter({ text: `Posted by ${BRAND_NAME}` })
           .setTimestamp();
 
@@ -1442,31 +3236,47 @@ client.on(Events.InteractionCreate, async (interaction) => {
         );
 
         const sent = await ch.send({ embeds: [embed], components: [row], allowedMentions: { parse: [] } });
+        await updateMenfessPostLink(menfessId, { messageId: sent.id, channelId: ch.id });
 
-        const db2 = loadMenfessDB();
-        db2.posts[String(menfessId)] = { messageId: sent.id, channelId: ch.id };
-        saveMenfessDB(db2);
+        await sendMenfessLog(interaction.guild, {
+          embeds: [
+            new EmbedBuilder()
+              .setTitle(`🧾 MENFESS LOG #${menfessId}`)
+              .setColor(0xffc107)
+              .setDescription(
+                [
+                  `**Sender:** <@${interaction.user.id}> (${interaction.user.tag})`,
+                  `**Sender ID:** ${interaction.user.id}`,
+                  `**To:** ${safeText(to, 24)}`,
+                  `**Channel:** <#${ch.id}>`,
+                  `**Message ID:** ${sent.id}`,
+                  "",
+                  "**Content:**",
+                  content.length > 1800 ? content.slice(0, 1800) + "…" : content,
+                ].join("\n")
+              )
+              .setTimestamp(),
+          ],
+          allowedMentions: { parse: [] },
+        });
 
-        return safeReply(interaction, { content: "✅ menfess terkirim.", flags: InteractionResponseFlags.Ephemeral });
+        return safeReply(interaction, { content: "✅ menfess terkirim.", flags: MessageFlags.Ephemeral });
       }
 
-      // menfess reply submit
       if (id.startsWith("menfess:reply_submit:")) {
         const menfessId = id.split(":")[2];
         const replyText = interaction.fields.getTextInputValue("reply_msg").trim();
-        if (!replyText) return safeReply(interaction, { content: "Balasan kosong 😭", flags: InteractionResponseFlags.Ephemeral });
+        if (!replyText) return safeReply(interaction, { content: "Balasan kosong 😭", flags: MessageFlags.Ephemeral });
 
-        const db = loadMenfessDB();
-        const post = db.posts[String(menfessId)];
-        if (!post) return safeReply(interaction, { content: "Menfess asal tidak ditemukan (mungkin sudah kehapus).", flags: InteractionResponseFlags.Ephemeral });
+        const post = await getMenfessPostById(menfessId);
+        if (!post?.message_id || !post?.channel_id) {
+          return safeReply(interaction, { content: "Menfess asal tidak ditemukan (mungkin sudah kehapus).", flags: MessageFlags.Ephemeral });
+        }
 
-        const res = await getTextChannelOrExplain(interaction.guild, post.channelId);
-        if (!res.ok) return safeReply(interaction, { content: `⚠️ Reply gagal: ${explainChannelError(res)}`, flags: InteractionResponseFlags.Ephemeral });
+        const ch = await getTextChannelOrNull(interaction.guild, post.channel_id);
+        if (!ch) return safeReply(interaction, { content: "Channel menfess tidak valid / bot tidak punya akses.", flags: MessageFlags.Ephemeral });
 
-        const ch = res.channel;
-
-        const anon = getAnonLabel(db, interaction.user.id);
-        saveMenfessDB(db);
+        const anon = "Pengirim Anonymous";
 
         const embed = new EmbedBuilder()
           .setTitle("🫣 Balasan Anonim")
@@ -1477,15 +3287,141 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         await ch.send({
           embeds: [embed],
-          reply: { messageReference: post.messageId },
+          reply: { messageReference: post.message_id },
           allowedMentions: { repliedUser: false, parse: [] },
         });
 
-        return safeReply(interaction, { content: "✅ balasan terkirim.", flags: InteractionResponseFlags.Ephemeral });
+        await sendMenfessLog(interaction.guild, {
+          embeds: [
+            new EmbedBuilder()
+              .setTitle(`🧾 MENFESS REPLY LOG -> #${menfessId}`)
+              .setColor(0x03a9f4)
+              .setDescription(
+                [
+                  `**Replier:** <@${interaction.user.id}> (${interaction.user.tag})`,
+                  `**Replier ID:** ${interaction.user.id}`,
+                  `**Reply To Menfess:** #${menfessId}`,
+                  "",
+                  "**Reply:**",
+                  replyText.length > 1800 ? replyText.slice(0, 1800) + "…" : replyText,
+                ].join("\n")
+              )
+              .setTimestamp(),
+          ],
+          allowedMentions: { parse: [] },
+        });
+
+        return safeReply(interaction, { content: "✅ balasan terkirim.", flags: MessageFlags.Ephemeral });
       }
 
-      // idcard submit
+      if (id.startsWith("ticket:submit:")) {
+  await safeDefer(interaction, true);
+
+  const guild = interaction.guild;
+  const user = interaction.user;
+
+  const type = id.split(":")[2]; // complaint / report
+  const label = type === "report" ? "REPORT" : "KELUHAN";
+
+  const categoryId = requireEnv("TICKET_CATEGORY_ID");
+  const staffRoleId = requireEnv("TICKET_STAFF_ROLE_ID");
+  if (!categoryId || !staffRoleId) {
+    return interaction.editReply("⚠️ Ticket belum dikonfigurasi (TICKET_CATEGORY_ID / TICKET_STAFF_ROLE_ID).");
+  }
+
+  const subject = interaction.fields.getTextInputValue("subject").trim();
+  const detail = interaction.fields.getTextInputValue("detail").trim();
+
+  // bikin nama channel aman (max 100, tanpa spasi aneh)
+  const safeUser = user.username.toLowerCase().replace(/[^a-z0-9-_]/g, "").slice(0, 12) || "user";
+  const chName = `ticket-${type}-${safeUser}`.slice(0, 90);
+
+  const channel = await guild.channels.create({
+    name: chName,
+    parent: categoryId,
+    topic: ticketMeta(type, user.id),
+    permissionOverwrites: [
+      { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+      {
+        id: user.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.EmbedLinks,
+        ],
+      },
+      {
+        id: staffRoleId,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.ManageMessages,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.EmbedLinks,
+        ],
+      },
+    ],
+  });
+
+  const mainEmbed = new EmbedBuilder()
+    .setTitle(`🎫 TICKET ${label}`)
+    .setColor(type === "report" ? 0xff5252 : EMBED_COLOR)
+    .setDescription(
+      [
+        `👤 **Pengirim:** <@${user.id}>`,
+        `📌 **Judul:** ${subject}`,
+        "",
+        "📝 **Detail:**",
+        detail,
+        "",
+        "🧠 Staff dapat **Claim** ticket ini untuk menandai penanggung jawab.",
+        "🔒 Jika sudah selesai, staff dapat menutup ticket dan transcript akan tersimpan.",
+      ].join("\n")
+    )
+    .setFooter({ text: "Mystral Academy • Ticket System" })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("ticket:claim").setLabel("Claim").setStyle(ButtonStyle.Primary).setEmoji("🧠"),
+    new ButtonBuilder().setCustomId("ticket:close").setLabel("Close").setStyle(ButtonStyle.Secondary).setEmoji("🔒")
+  );
+
+  await channel.send({
+    content: `<@&${staffRoleId}>`,
+    embeds: [mainEmbed],
+    components: [row],
+    allowedMentions: { roles: [staffRoleId] },
+  });
+
+  // log open
+  const logCh = await getTicketLogChannel(guild);
+  if (logCh) {
+    const logEmbed = new EmbedBuilder()
+      .setTitle("📄 Ticket Opened")
+      .setColor(type === "report" ? 0xff5252 : EMBED_COLOR)
+      .setDescription(
+        [
+          `**Type:** ${type.toUpperCase()}`,
+          `**User:** <@${user.id}> (${user.tag})`,
+          `**Channel:** ${channel}`,
+          `**Subject:** ${subject}`,
+        ].join("\n")
+      )
+      .setTimestamp();
+
+    await logCh.send({ embeds: [logEmbed], allowedMentions: { parse: [] } }).catch(() => {});
+  }
+
+  return interaction.editReply(`✅ Ticket dibuat: ${channel}`);
+}
+
+
+      // ID CARD SUBMIT (OWNER LOCK BY SLASH ONLY) — modal ini cuma kebuka dari tombol /idcard (owner)
       if (id === "idcard:submit") {
+        await safeDefer(interaction, false);
         const rawName = interaction.fields.getTextInputValue("name");
         const rawGender = interaction.fields.getTextInputValue("gender");
         const rawDom = interaction.fields.getTextInputValue("dom");
@@ -1505,27 +3441,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           theme,
         };
 
-        const db = loadIdDB();
-        const uid = interaction.user.id;
-
-        if (!db.users[uid]) db.users[uid] = { number: genCardNumber(uid), createdAt: Date.now() };
-        db.users[uid] = { ...db.users[uid], ...payload, updatedAt: Date.now() };
-        saveIdDB(db);
-
-        const createdAtText = new Date(db.users[uid].createdAt).toLocaleDateString("id-ID", {
-          day: "2-digit",
-          month: "long",
-          year: "numeric",
-        });
-
-        const sorted = getSortedUser(uid);
+        const saved = await upsertIdCard(interaction.user.id, payload);
+        const sorted = await getSortedUser(interaction.user.id);
         const arcanaChoice = sorted?.choice || null;
-
-        await safeDeferReply(interaction, { ephemeral: false });
+        const createdAtText = formatIdDate(Number(saved.created_at) || Date.now());
 
         const png = await renderIdCard({
           theme: payload.theme,
-          number: db.users[uid].number,
+          number: saved.number || "—",
           name: payload.name,
           gender: payload.gender,
           domisili: payload.domisili,
@@ -1549,23 +3472,45 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setImage("attachment://hov_idcard.png")
           .setTimestamp();
 
-        return safeReply(interaction, {
-          embeds: [embed],
-          files: [file],
-          components: [row],
-          allowedMentions: { parse: [] },
-        });
+        return safeReply(interaction, { embeds: [embed], files: [file], components: [row], allowedMentions: { parse: [] } });
       }
-
-      return;
     }
   } catch (err) {
-    console.error(err);
-    if (!interaction.replied && !interaction.deferred) {
-      return safeReply(interaction, { content: "⚠️ ada error di bot, coba lagi ya.", flags: InteractionResponseFlags.Ephemeral });
+  console.error("[INTERACTION ERROR]", err);
+
+  try {
+    if (interaction.deferred && !interaction.replied) {
+      return await interaction.editReply({
+        content: "⚠️ ada error di bot, coba lagi ya.",
+      });
     }
-  }
+
+    if (!interaction.replied && !interaction.deferred) {
+      return await interaction.reply({
+        content: "⚠️ ada error di bot, coba lagi ya.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+  } catch {}
+}
 });
 
-// ===================== LOGIN =====================
-client.login(process.env.DISCORD_TOKEN);
+// ===================== BOOT =====================
+(async function boot() {
+  try {
+    if (!process.env.DISCORD_TOKEN) {
+      console.error("❌ DISCORD_TOKEN belum diisi di .env");
+      process.exit(1);
+    }
+
+    openDb();
+    await initDb();
+    await ensureMenfessCounterStart();
+
+    console.log("[DB] SQLite ready:", SQLITE_PATH);
+    client.login(process.env.DISCORD_TOKEN);
+  } catch (e) {
+    console.error("❌ Boot failed:", e);
+    process.exit(1);
+  }
+})();

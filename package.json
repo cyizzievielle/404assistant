@@ -1,17 +1,19 @@
 {
-  "name": "404assistant",
+  "name": "hovassistant",
   "version": "1.0.0",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "deploy:commands": "node deploy-commands.js",
+    "migrate": "node migrate.js"
   },
   "dependencies": {
-    "@napi-rs/canvas": "^0.1.85",
+    "@napi-rs/canvas": "^0.1.88",
+    "better-sqlite3": "^12.5.0",
     "canvas": "^3.2.0",
     "discord.js": "^14.25.1",
-    "dotenv": "^17.2.3",
-    "mysql2": "^3.16.0"
+    "dotenv": "^17.2.3"
   },
   "engines": {
     "node": ">=18"

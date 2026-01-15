@@ -18,3 +18,10 @@ menfess_db.json
 sorting_db.json
 idcard_db.json
 node_modules
+
+data/
+*.db
+*.db-wal
+*.db-shm
+
+*_db.json
