@@ -35,7 +35,9 @@ const commands = [
   new SlashCommandBuilder()
     .setName("help")
     .setDescription("lihat daftar perintah bot"),
-
+new SlashCommandBuilder()
+  .setName("topactive")
+  .setDescription("Leaderboard aktivitas 7 hari terakhir"),
   new SlashCommandBuilder()
     .setName("avatar")
     .setDescription("lihat avatar user")
@@ -89,8 +91,44 @@ const commands = [
   new SlashCommandBuilder()
     .setName("selfrolespanel")
     .setDescription("kirim panel self-role (Age/Interest/Status/Region/Ping) (owner only)"),
+new SlashCommandBuilder()
+  .setName("idcard_export")
+  .setDescription("Export semua ID Card (OWNER ONLY)"), // OWNER-only: send embed custom
+  new SlashCommandBuilder()
+  .setName("afk_list")
+  .setDescription("Melihat daftar user yang sedang AFK"),
+new SlashCommandBuilder()
+  .setName("lastseen")
+  .setDescription("Cek last seen user")
+  .addUserOption((o) =>
+    o.setName("user")
+     .setDescription("Pilih user")
+     .setRequired(true)
+  ),
 
-  // OWNER-only: send embed custom
+new SlashCommandBuilder()
+  .setName("remind_in")
+  .setDescription("Buat reminder dalam X menit")
+  .addIntegerOption((o) =>
+    o.setName("minutes")
+     .setDescription("Dalam berapa menit")
+     .setRequired(true)
+  )
+  .addStringOption((o) =>
+    o.setName("message")
+     .setDescription("Pesan reminder")
+     .setRequired(true)
+  ),
+
+  new SlashCommandBuilder()
+  .setName("remind_at")
+  .setDescription("Buat reminder di waktu tertentu (WIB)")
+  .addStringOption(o => o.setName("time_wib").setDescription("Format: YYYY-MM-DD HH:mm (WIB)").setRequired(true))
+  .addStringOption(o => o.setName("message").setDescription("Pesan reminder").setRequired(true)),
+new SlashCommandBuilder()
+  .setName("remind_list")
+  .setDescription("Lihat reminder aktif kamu"),
+
   new SlashCommandBuilder()
     .setName("sendembed")
     .setDescription("kirim embed custom ke channel (owner-only)")

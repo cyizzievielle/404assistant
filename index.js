@@ -392,6 +392,25 @@ async function safeRun(sql, params = []) {
 async function safeExec(sql) {
   try { return await dbExec(sql); } catch { return null; }
 }
+// =======================
+// MENFESS ID HELPER
+// =======================
+async function nextMenfessId() {
+  const row = await safeGet(
+    `SELECT value FROM menfess_meta WHERE key='menfess_last_id'`
+  );
+
+  const current = Number(row?.value || 0);
+  const next = current + 1;
+
+  await safeRun(
+    `UPDATE menfess_meta SET value=? WHERE key='menfess_last_id'`,
+    [next]
+  );
+
+  return next;
+}
+
 
 
 // ===================== DISCORD CLIENT =====================
@@ -649,14 +668,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
           }
         }
 
-        async function safeDefer(interaction, ephemeral = true) {
-          try {
-            if (interaction.deferred || interaction.replied) return;
-            await interaction.deferReply(ephemeral ? { flags: MessageFlags.Ephemeral } : {});
-          } catch (e) {
-            console.error("[safeDefer] failed:", e?.message || e);
+      async function safeDefer(interaction, ephemeral = true) {
+        try {
+          if (interaction.deferred || interaction.replied) return;
+
+          // discord.js v14: bisa pakai ephemeral:true atau flags
+          if (ephemeral) {
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+          } else {
+            await interaction.deferReply(); // public
           }
+        } catch (e) {
+          console.error("[safeDefer] failed:", e?.message || e);
         }
+      }
+
 
         async function safeDeferUpdate(interaction) {
           try {
@@ -775,6 +801,25 @@ async function initDb() {
       key TEXT PRIMARY KEY,
       value TEXT
     );
+     CREATE TABLE IF NOT EXISTS user_activity (
+    user_id TEXT PRIMARY KEY,
+    last_seen INTEGER NOT NULL DEFAULT 0,
+    msg_total INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS activity_daily (
+    day TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    msg_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, user_id)
+  );
+    CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    message TEXT NOT NULL,
+    due_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    is_done INTEGER NOT NULL DEFAULT 0);
   `);
 }
 
@@ -1015,6 +1060,21 @@ async function buildTicketTranscript(channel) {
 async function getIdCard(userId) {
   return (await safeGet(`SELECT * FROM idcard_users WHERE user_id=?`, [userId])) || null;
 }
+async function getAllIdCards() {
+  return await safeAll(`
+    SELECT *
+    FROM idcard_users
+    ORDER BY created_at ASC
+  `);
+}
+async function getAllAfkUsers() {
+  return await safeAll(`
+    SELECT *
+    FROM afk_users
+    ORDER BY since ASC
+  `);
+}
+
 
 async function upsertIdCard(userId, data) {
   const existing = await getIdCard(userId);
@@ -1686,6 +1746,31 @@ client.once(Events.ClientReady, async (c) => {
 
 });
 
+async function startReminderLoop(client) {
+  setInterval(async () => {
+    try {
+      const now = Date.now();
+      const due = await safeAll(
+        `SELECT * FROM reminders
+         WHERE is_done = 0 AND due_at <= ?
+         ORDER BY due_at ASC
+         LIMIT 10`,
+        [now]
+      );
+
+      for (const r of due) {
+        const ch = await client.channels.fetch(r.channel_id).catch(() => null);
+        if (ch) {
+          const when = `<t:${Math.floor(r.due_at / 1000)}:R>`;
+          await ch.send(`⏰ <@${r.user_id}> reminder (${when}): **${r.message}**`);
+        }
+        await safeRun("UPDATE reminders SET is_done = 1 WHERE id = ?", [r.id]);
+      }
+    } catch (e) {
+      console.error("[reminderLoop]", e);
+    }
+  }, 10_000);
+}
 // ===================== AUTO WELCOME =====================
 client.on(Events.GuildMemberAdd, async (member) => {
   const channel = await getTextChannelOrNull(member.guild, requireEnv("GENERAL_CHANNEL_ID"));
@@ -1702,6 +1787,28 @@ client.on(Events.GuildMemberAdd, async (member) => {
 client.on(Events.GuildMemberRemove, async (member) => {
   updateStatsChannels(member.guild);
 });
+
+// WIB day key
+const now = Date.now();
+const wib = new Date(now + 7 * 60 * 60 * 1000);
+const day = wib.toISOString().slice(0, 10);
+
+await safeRun(
+  `INSERT INTO user_activity (user_id, last_seen, msg_total)
+   VALUES (?, ?, 1)
+   ON CONFLICT(user_id) DO UPDATE SET
+     last_seen=excluded.last_seen,
+     msg_total=user_activity.msg_total+1`,
+  [message.author.id, now]
+);
+
+await safeRun(
+  `INSERT INTO activity_daily (day, user_id, msg_count)
+   VALUES (?, ?, 1)
+   ON CONFLICT(day, user_id) DO UPDATE SET
+     msg_count=activity_daily.msg_count+1`,
+  [day, message.author.id]
+);
 
 // ===================== PREFIX COMMANDS =====================
 client.on(Events.MessageCreate, async (message) => {
@@ -1731,8 +1838,31 @@ client.on(Events.MessageCreate, async (message) => {
     .catch(() => {});
 }
 
+if (message.author.bot) return;
 
-    // AFK notice on mentions
+// WIB day key
+const now = Date.now();
+const wib = new Date(now + 7 * 60 * 60 * 1000);
+const day = wib.toISOString().slice(0, 10); // YYYY-MM-DD
+
+await safeRun(
+  `INSERT INTO user_activity (user_id, last_seen, msg_total)
+   VALUES (?, ?, 1)
+   ON CONFLICT(user_id) DO UPDATE SET
+     last_seen=excluded.last_seen,
+     msg_total=user_activity.msg_total+1`,
+  [message.author.id, now]
+);
+
+await safeRun(
+  `INSERT INTO activity_daily (day, user_id, msg_count)
+   VALUES (?, ?, 1)
+   ON CONFLICT(day, user_id) DO UPDATE SET
+     msg_count=activity_daily.msg_count+1`,
+  [day, message.author.id]
+);
+
+// AFK notice on mentions
     if (message.mentions?.users?.size) {
       const lines = [];
       for (const [uid, user] of message.mentions.users) {
@@ -2172,145 +2302,232 @@ if (cmd === "profile") {
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
 
-        // ===================== STRING SELECT (SELF ROLES) =====================
-        if (interaction.isStringSelectMenu()) {
-          const { customId, values, guild, member } = interaction;
+if (interaction.isStringSelectMenu()) {
+  const { customId, values, guild, member } = interaction;
 
-          if (!guild || !member) {
-            return interaction.reply({
-              content: "⚠️ Interaction ini hanya bisa dipakai di server.",
-              flags: MessageFlags.Ephemeral
-            });
-          }
-          try {
-            // ===== AGE (1 role only) =====
-            if (customId === "self:age") {
-              const toRemove = member.roles.cache.filter((r) => SELF_AGE_IDS.includes(r.id));
-              if (toRemove.size) await member.roles.remove(toRemove);
+  if (!guild || !member) {
+    return interaction.reply({
+      content: "⚠️ Interaction ini hanya bisa dipakai di server.",
+      flags: MessageFlags.Ephemeral,
+    });
+  }
 
-              if (values.length) await member.roles.add(values[0]);
-              return interaction.editReply("✅ **Age role** berhasil diperbarui.");
-            }
+  try {
+    // ===== AGE (1 role only) =====
+    if (customId === "self:age") {
+      const toRemove = member.roles.cache.filter((r) => SELF_AGE_IDS.includes(r.id));
+      if (toRemove.size) await member.roles.remove(toRemove);
 
-            // ===== STATUS (1 role only) =====
-            if (customId === "self:status") {
-              const toRemove = member.roles.cache.filter((r) => SELF_STATUS_IDS.includes(r.id));
-              if (toRemove.size) await member.roles.remove(toRemove);
+      if (values.length) await member.roles.add(values[0]);
 
-              if (values.length) {
-                await member.roles.add(values[0]);
-                return interaction.editReply("💖 **Status role** diperbarui.");
-              }
+      return interaction.reply({
+        content: "✅ **Age role** berhasil diperbarui.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
 
-              return interaction.editReply("🧹 **Status role** dihapus.");
-            }
+    // ===== STATUS (1 role only) =====
+    if (customId === "self:status") {
+      const toRemove = member.roles.cache.filter((r) => SELF_STATUS_IDS.includes(r.id));
+      if (toRemove.size) await member.roles.remove(toRemove);
 
-            // ===== REGION (1 role only) =====
-            if (customId === "self:region") {
-              const toRemove = member.roles.cache.filter((r) => SELF_REGION_IDS.includes(r.id));
-              if (toRemove.size) await member.roles.remove(toRemove);
+      if (values.length) {
+        await member.roles.add(values[0]);
+        return interaction.reply({
+          content: "💖 **Status role** diperbarui.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
 
-              if (values.length) {
-                await member.roles.add(values[0]);
-                return interaction.editReply("🗺️ **Region role** diperbarui.");
-              }
+      return interaction.reply({
+        content: "🧹 **Status role** dihapus.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
 
-              return interaction.editReply("🧹 **Region role** dihapus.");
-            }
+    // ===== REGION (1 role only) =====
+    if (customId === "self:region") {
+      const toRemove = member.roles.cache.filter((r) => SELF_REGION_IDS.includes(r.id));
+      if (toRemove.size) await member.roles.remove(toRemove);
 
-            // ===== PING (MULTI) =====
-            if (customId === "self:ping") {
-              const toRemove = member.roles.cache.filter((r) => SELF_PING_IDS.includes(r.id));
-              if (toRemove.size) await member.roles.remove(toRemove);
+      if (values.length) {
+        await member.roles.add(values[0]);
+        return interaction.reply({
+          content: "🗺️ **Region role** diperbarui.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
 
-              if (values.length) await member.roles.add(values);
-              return interaction.editReply("🔔 **Ping roles** diperbarui.");
-            }
+      return interaction.reply({
+        content: "🧹 **Region role** dihapus.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
 
-            // ===== INTEREST (MULTI, per kategori) =====
-            if (customId.startsWith("self:int_")) {
-              const optionsForThisMenu = INTEREST_MENU_MAP[customId] || [];
-              const idsForThisMenu = optionsForThisMenu.map((x) => x.value);
+    // ===== PING (MULTI) =====
+    if (customId === "self:ping") {
+      const toRemove = member.roles.cache.filter((r) => SELF_PING_IDS.includes(r.id));
+      if (toRemove.size) await member.roles.remove(toRemove);
 
-              const toRemove = member.roles.cache.filter((r) => idsForThisMenu.includes(r.id));
-              if (toRemove.size) await member.roles.remove(toRemove);
+      if (values.length) await member.roles.add(values);
 
-              if (values.length) await member.roles.add(values);
+      return interaction.reply({
+        content: "🔔 **Ping roles** diperbarui.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
 
-              return interaction.editReply("🎯 **Interest roles** diperbarui.");
-            }
+    // ===== INTEREST (MULTI, per kategori) =====
+    if (customId.startsWith("self:int_")) {
+      const optionsForThisMenu = INTEREST_MENU_MAP[customId] || [];
+      const idsForThisMenu = optionsForThisMenu.map((x) => x.value);
 
-            return interaction.editReply("⚠️ Select menu tidak dikenali.");
-          } catch (err) {
-            console.error("[SELF ROLE ERROR]", err);
-            return interaction.editReply("❌ Gagal mengubah role. Cek permission bot.");
-          }
-        }
+      const toRemove = member.roles.cache.filter((r) => idsForThisMenu.includes(r.id));
+      if (toRemove.size) await member.roles.remove(toRemove);
+
+      if (values.length) await member.roles.add(values);
+
+      return interaction.reply({
+        content: "🎯 **Interest roles** diperbarui.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+
+    return interaction.reply({
+      content: "⚠️ Select menu tidak dikenali.",
+      flags: MessageFlags.Ephemeral,
+    });
+  } catch (err) {
+    console.error("[SELF ROLE ERROR]", err);
+    return interaction.reply({
+      content: "❌ Gagal mengubah role. Cek permission bot.",
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+}
 
     // ===================== SLASH =====================
     if (interaction.isChatInputCommand()) {
       const name = interaction.commandName;
 
       if (name === "ping") return safeReply(interaction, { content: `🏓 pong! ${client.ws.ping}ms` });
-      
+      if (name === "lastseen") {
+  const user = interaction.options.getUser("user", true);
+
+  const row = await safeGet(
+    "SELECT last_seen, msg_total FROM user_activity WHERE user_id = ?",
+    [user.id]
+  );
+
+  if (!row || !row.last_seen) {
+    return safeReply(interaction, { content: `Belum ada data aktivitas untuk <@${user.id}>.`, flags: MessageFlags.Ephemeral });
+  }
+
+  const ts = Math.floor(row.last_seen / 1000);
+  return safeReply(interaction, {
+    content: `🕒 **Last seen** <@${user.id}>: <t:${ts}:R>\n💬 Total pesan tercatat: **${row.msg_total}**`,
+    flags: MessageFlags.Ephemeral,
+  });
+}
+if (name === "topactive") {
+  await safeDefer(interaction, true);
+
+  // last 7 WIB days (inclusive)
+  const now = Date.now();
+  const wib = new Date(now + 7 * 60 * 60 * 1000);
+  const end = wib.toISOString().slice(0, 10);
+
+  // ambil 7 hari terakhir via JS (simpel & aman)
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date((now + 7 * 60 * 60 * 1000) - i * 86400000);
+    days.push(d.toISOString().slice(0, 10));
+  }
+
+  const placeholders = days.map(() => "?").join(",");
+  const rows = await safeAll(
+    `SELECT user_id, SUM(msg_count) AS total
+     FROM activity_daily
+     WHERE day IN (${placeholders})
+     GROUP BY user_id
+     ORDER BY total DESC
+     LIMIT 10`,
+    days
+  );
+
+  if (!rows.length) return interaction.editReply("Belum ada data activity 7 hari terakhir.");
+
+  const text =
+    `🏆 **Top Active (7 hari terakhir, WIB)**\n` +
+    rows.map((r, i) => `**${i + 1}.** <@${r.user_id}> — **${r.total}** msg`).join("\n");
+
+  return interaction.editReply(text);
+}
+
+      // ===================== ID CARD EXPORT (OWNER ONLY) =====================
+if (name === "idcard_export") {
+  if (!isBotOwner(interaction.user.id)) {
+    return safeReply(interaction, {
+      content: "❌ command ini khusus owner.",
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  await safeDefer(interaction, true);
+
+  const rows = await getAllIdCards();
+
+  if (!rows.length) {
+    return interaction.editReply("📭 Tidak ada data ID Card.");
+  }
+
+  const payload = rows.map((r, i) => ({
+    no: i + 1,
+    user_id: r.user_id,
+    number: r.number,
+    name: r.name,
+    gender: r.gender,
+    domisili: r.domisili,
+    hobi: r.hobi,
+    status: r.status,
+    theme: r.theme,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  }));
+
+  const json = Buffer.from(JSON.stringify(payload, null, 2));
+  const file = new AttachmentBuilder(json, { name: "idcard_export.json" });
+
+  return interaction.editReply({
+    content: `✅ **Export selesai**\nTotal ID Card: **${rows.length}**`,
+    files: [file],
+  });
+}
+
       if (name === "help") {
         const embed = new EmbedBuilder()
           .setTitle("📜 Mystral Assistant — Help (Slash)")
           .setColor(EMBED_COLOR)
-          .setDescription(
-            [
-              "Selamat datang di aula panduan.",
-              "Di bawah ini daftar mantra (slash command) yang tersedia di server ini.",
-            ].join("\n")
-          )
+          .setDescription([
+            "Selamat datang di aula panduan.",
+            "Di bawah ini daftar mantra (slash command) yang tersedia di server ini.",
+          ].join("\n"))
           .addFields(
-            {
-              name: "🧭 Basic",
-              value: ["• `/help`", "• `/ping`", "• `/halo`", "• `/about`"].join("\n"),
-              inline: true,
-            },
-            {
-              name: "🪞 Info",
-              value: [
-                "• `/avatar [user]`",
-                "• `/userinfo [user]`",
-                "• `/serverinfo`",
-                "• `/profile [user]`",
-              ].join("\n"),
-              inline: true,
-            },
-            {
-              name: "🕯️ AFK",
-              value: ["• `/afk [reason]` — set AFK dan tandai nickname **[AFK]**"].join("\n"),
-              inline: false,
-            },
-            {
-              name: "🪪 Registry / Arcana",
-              value: ["• `/registry`", "• `/myhouse [user]`"].join("\n"),
-              inline: false,
-            },
-            {
-              name: "🔐 Owner-only",
-              value: [
-                "• `/selfrolespanel` — kirim panel self roles",
-                "• `/menfesspanel`",
-                "• `/sortingpanel`",
-                "• `/ticketpanel`",
-                "• `/sendembed` — kirim embed custom",
-                "• `/idcard`",
-              ].join("\n"),
-              inline: false,
-            }
+            { name: "🧭 Basic", value: ["• `/help`", "• `/ping`", "• `/halo`", "• `/about`"].join("\n"), inline: true },
+            { name: "🪞 Info", value: ["• `/avatar [user]`", "• `/userinfo [user]`", "• `/serverinfo`", "• `/profile [user]`"].join("\n"), inline: true },
+            { name: "🕯️ AFK", value: ["• `/afk [reason]` — set AFK dan tandai nickname **[AFK]**"].join("\n"), inline: false },
+            { name: "🪪 Registry / Arcana", value: ["• `/registry`", "• `/myhouse [user]`"].join("\n"), inline: false },
+            { name: "🔐 Owner-only", value: ["• `/selfrolespanel`", "• `/menfesspanel`", "• `/sortingpanel`", "• `/ticketpanel`", "• `/sendembed`", "• `/idcard`"].join("\n"), inline: false }
           )
           .setFooter({ text: "Mystral Academy • Follow the rules, respect the realm." })
           .setTimestamp();
 
-        return safeReply(interaction, {
+        // PAKSA PUBLIC: reply fresh, bukan editReply
+        return interaction.reply({
           embeds: [embed],
-          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
         });
       }
-
       // ===================== SELF ROLES PANEL (OWNER-ONLY) =====================
       if (name === "selfrolespanel") {
         if (!isBotOwner(interaction.user.id)) {
@@ -2677,6 +2894,79 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         return safeReply(interaction, { embeds: [embed], allowedMentions: { parse: [] } });
       }
+      //remind
+      if (name === "remind_in") {
+        const minutes = interaction.options.getInteger("minutes", true);
+        const msg = interaction.options.getString("message", true);
+
+        const due = Date.now() + minutes * 60 * 1000;
+
+        await safeRun(
+          `INSERT INTO reminders (user_id, channel_id, message, due_at, created_at)
+          VALUES (?, ?, ?, ?, ?)`,
+          [interaction.user.id, interaction.channelId, msg, due, Date.now()]
+        );
+
+        return safeReply(interaction, {
+          content: `✅ Reminder diset untuk <t:${Math.floor(due / 1000)}:R>`,
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      function parseWibToUtcMs(s) {
+  // s: "2026-01-18 19:30" (WIB)
+  const m = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/.exec(s.trim());
+  if (!m) return null;
+  const [_, Y, Mo, D, H, Mi] = m;
+  // buat sebagai UTC lalu kurangi 7 jam (karena input adalah WIB)
+  const utcMs = Date.UTC(+Y, +Mo - 1, +D, +H, +Mi);
+  return utcMs - 7 * 60 * 60 * 1000;
+}
+
+if (name === "remind_at") {
+  const at = interaction.options.getString("time_wib", true);
+  const msg = interaction.options.getString("message", true);
+
+  const due = parseWibToUtcMs(at);
+  if (!due) {
+    return safeReply(interaction, {
+      content: "❌ Format salah. Pakai: `YYYY-MM-DD HH:mm` (WIB). Contoh: `2026-01-18 19:30`",
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  await safeRun(
+    `INSERT INTO reminders (user_id, channel_id, message, due_at, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [interaction.user.id, interaction.channelId, msg, due, Date.now()]
+  );
+
+  return safeReply(interaction, {
+    content: `✅ Reminder diset untuk <t:${Math.floor(due / 1000)}:F>`,
+    flags: MessageFlags.Ephemeral,
+  });
+}
+if (name === "remind_list") {
+  await safeDefer(interaction, true);
+
+  const rows = await safeAll(
+    `SELECT id, message, due_at
+     FROM reminders
+     WHERE user_id = ? AND is_done = 0
+     ORDER BY due_at ASC
+     LIMIT 20`,
+    [interaction.user.id]
+  );
+
+  if (!rows.length) return interaction.editReply("Kamu belum punya reminder aktif.");
+
+  const text =
+    `🗓️ **Reminder kamu**\n\n` +
+    rows.map(r => `• \`#${r.id}\` <t:${Math.floor(r.due_at/1000)}:F> — ${r.message}`).join("\n");
+
+  return interaction.editReply(text);
+}
+
 
       //afk
       if (name === "afk") {
@@ -2742,6 +3032,39 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await ch.send({ embeds: [sortingPanelEmbed()], components: [sortingPanelRow()], allowedMentions: { parse: [] } });
         return safeReply(interaction, { content: "✅ panel sorting terkirim.", flags: MessageFlags.Ephemeral });
       }
+
+      // ===================== AFK LIST =====================
+if (name === "afk_list") {
+  await safeDefer(interaction, true);
+
+  const rows = await getAllAfkUsers();
+
+  if (!rows.length) {
+    return interaction.editReply("✅ Tidak ada user yang sedang AFK.");
+  }
+
+  const perPage = 10;
+  let page = 0;
+  const maxPage = Math.ceil(rows.length / perPage);
+
+  const text =
+    `🛌 **DAFTAR USER AFK**\n\n` +
+    rows
+      .slice(0, perPage)
+      .map((u, i) => {
+        const since = `<t:${Math.floor(u.since / 1000)}:R>`;
+        return (
+          `**${i + 1}.** <@${u.user_id}>\n` +
+          `• Alasan: ${u.reason || "—"}\n` +
+          `• Sejak: ${since}`
+        );
+      })
+      .join("\n\n") +
+    `\n\nTotal AFK: ${rows.length}`;
+
+  return interaction.editReply(text);
+}
+
 
       // OWNER ONLY
       if (name === "idcard") {
@@ -3199,6 +3522,8 @@ if (id === "ticket:close") {
     }
 
       if (id === "menfess:submit") {
+        await safeDefer(interaction, true); // <-- TAMBAH INI DI BARIS PERTAMA BLOK
+
         const ch = await getTextChannelOrNull(interaction.guild, requireEnv("MENFESS_CHANNEL_ID"));
         if (!ch) return safeReply(interaction, { content: "Channel menfess tidak ketemu / bot tidak punya akses.", flags: MessageFlags.Ephemeral });
 
@@ -3218,8 +3543,9 @@ if (id === "ticket:close") {
         menfessCooldown.set(interaction.user.id, now);
 
         const senderLabel = "Pengirim Anonymous";
-        const menfessId = await nextMenfessId();
 
+        const menfessId = await nextMenfessId();
+        
         await insertMenfessPost({ id: menfessId, messageId: null, channelId: ch.id });
         await getAnonLabel(interaction.user.id);
 
