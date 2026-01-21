@@ -46,7 +46,6 @@ const {
   StringSelectMenuBuilder,
 } = require("discord.js");
 
-
 const { createCanvas, loadImage, GlobalFonts } = require("@napi-rs/canvas");
 
 // ===================== CONFIG =====================
@@ -272,9 +271,15 @@ function isBotOwner(userId) {
   return String(userId) === String(BOT_OWNER_ID);
 }
 
+// ✅ SATU AJA (jangan dobel)
 const SQLITE_PATH = requireEnv("SQLITE_PATH") || "./data/hovassistant_v2.db";
 const dir = path.dirname(SQLITE_PATH);
 if (dir && dir !== "." && dir !== "/") fs.mkdirSync(dir, { recursive: true });
+
+// ===================== DB BACKUP CONFIG =====================
+const BACKUP_DIR = path.join(path.dirname(SQLITE_PATH), "_backups");
+const BACKUP_EVERY_MIN = Number(process.env.BACKUP_EVERY_MIN || 360); // 6 jam
+const BACKUP_KEEP = Number(process.env.BACKUP_KEEP || 30);
 
 // ===================== DB ENGINE AUTO =====================
 let DB_ENGINE = null;
@@ -314,7 +319,7 @@ function openDb() {
   if (DB_ENGINE === "better-sqlite3") {
     db = new BetterSqlite(SQLITE_PATH);
 
-    db.pragma("journal_mode = WAL");
+    db.pragma("wal_checkpoint(TRUNCATE)");
     db.pragma("synchronous = NORMAL");
     db.pragma("foreign_keys = ON");
 
@@ -392,6 +397,44 @@ async function safeRun(sql, params = []) {
 async function safeExec(sql) {
   try { return await dbExec(sql); } catch { return null; }
 }
+// ===================== DB BACKUP HELPER =====================
+function ensureDir(dir) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function rotateBackups(dir, keep) {
+  const files = fs.readdirSync(dir)
+    .filter(f => f.endsWith(".db"))
+    .map(f => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }))
+    .sort((a, b) => b.t - a.t);
+
+  files.slice(keep).forEach(x => {
+    fs.unlinkSync(path.join(dir, x.f));
+  });
+}
+
+async function backupDatabase(reason = "scheduled") {
+  try {
+    ensureDir(BACKUP_DIR);
+
+    // paksa WAL masuk db utama (aman walau non-WAL)
+    await safeRun("PRAGMA wal_checkpoint(FULL);").catch(() => null);
+
+    const stamp = new Date(Date.now() + 7 * 60 * 60 * 1000)
+      .toISOString()
+      .replace(/[:.]/g, "-")
+      .slice(0, 19);
+
+    const out = path.join(BACKUP_DIR, `backup_${stamp}_${reason}.db`);
+    fs.copyFileSync(SQLITE_PATH, out);
+
+    rotateBackups(BACKUP_DIR, BACKUP_KEEP);
+    console.log("[BACKUP] OK:", out);
+  } catch (e) {
+    console.error("[BACKUP] FAIL:", e);
+  }
+}
+
 // =======================
 // MENFESS ID HELPER
 // =======================
@@ -1714,6 +1757,15 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`ONLINE AS: ${c.user.tag} | ID: ${c.user.id}`);
   console.log("[DB] SQLite ready:", SQLITE_PATH);
 
+    // ===================== AUTO BACKUP =====================
+  await backupDatabase("startup");
+
+  setInterval(() => {
+    backupDatabase("scheduled");
+  }, BACKUP_EVERY_MIN * 60 * 1000);
+
+  startReminderLoop(c);
+
   if (!process.env.BOT_OWNER_ID || process.env.BOT_OWNER_ID === "ISI_USERID_KAMU") {
     console.warn("[WARN] BOT_OWNER_ID belum diisi bener. Owner-only lock bakal ngaco.");
   }
@@ -1788,33 +1840,35 @@ client.on(Events.GuildMemberRemove, async (member) => {
   updateStatsChannels(member.guild);
 });
 
-// WIB day key
-const now = Date.now();
-const wib = new Date(now + 7 * 60 * 60 * 1000);
-const day = wib.toISOString().slice(0, 10);
-
-await safeRun(
-  `INSERT INTO user_activity (user_id, last_seen, msg_total)
-   VALUES (?, ?, 1)
-   ON CONFLICT(user_id) DO UPDATE SET
-     last_seen=excluded.last_seen,
-     msg_total=user_activity.msg_total+1`,
-  [message.author.id, now]
-);
-
-await safeRun(
-  `INSERT INTO activity_daily (day, user_id, msg_count)
-   VALUES (?, ?, 1)
-   ON CONFLICT(day, user_id) DO UPDATE SET
-     msg_count=activity_daily.msg_count+1`,
-  [day, message.author.id]
-);
-
 // ===================== PREFIX COMMANDS =====================
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild) return;
     if (message.author.bot) return;
+
+    // ✅ ACTIVITY LOGGER (taruh di sini)
+    const now = Date.now();
+    const wib = new Date(now + 7 * 60 * 60 * 1000);
+    const day = wib.toISOString().slice(0, 10); // YYYY-MM-DD (WIB)
+
+    await safeRun(
+      `INSERT INTO user_activity (user_id, last_seen, msg_total)
+       VALUES (?, ?, 1)
+       ON CONFLICT(user_id) DO UPDATE SET
+         last_seen=excluded.last_seen,
+         msg_total=user_activity.msg_total+1`,
+      [message.author.id, now]
+    );
+
+    await safeRun(
+      `INSERT INTO activity_daily (day, user_id, msg_count)
+       VALUES (?, ?, 1)
+       ON CONFLICT(day, user_id) DO UPDATE SET
+         msg_count=activity_daily.msg_count+1`,
+      [day, message.author.id]
+    );
+
+    // ... lanjut AFK auto clear, AFK notice, prefix command, dll
 
    // AFK auto clear on any message
   const wasAfk = await getAfk(message.author.id);
@@ -1837,30 +1891,6 @@ client.on(Events.MessageCreate, async (message) => {
     })
     .catch(() => {});
 }
-
-if (message.author.bot) return;
-
-// WIB day key
-const now = Date.now();
-const wib = new Date(now + 7 * 60 * 60 * 1000);
-const day = wib.toISOString().slice(0, 10); // YYYY-MM-DD
-
-await safeRun(
-  `INSERT INTO user_activity (user_id, last_seen, msg_total)
-   VALUES (?, ?, 1)
-   ON CONFLICT(user_id) DO UPDATE SET
-     last_seen=excluded.last_seen,
-     msg_total=user_activity.msg_total+1`,
-  [message.author.id, now]
-);
-
-await safeRun(
-  `INSERT INTO activity_daily (day, user_id, msg_count)
-   VALUES (?, ?, 1)
-   ON CONFLICT(day, user_id) DO UPDATE SET
-     msg_count=activity_daily.msg_count+1`,
-  [day, message.author.id]
-);
 
 // AFK notice on mentions
     if (message.mentions?.users?.size) {
@@ -3840,3 +3870,24 @@ if (id === "ticket:close") {
     process.exit(1);
   }
 })();
+// ===================== BACKUP ON EXIT =====================
+process.on("SIGINT", async () => {
+  await backupDatabase("sigint");
+  process.exit(0);
+});
+
+process.on("SIGTERM", async () => {
+  await backupDatabase("sigterm");
+  process.exit(0);
+});
+
+process.on("uncaughtException", async (err) => {
+  console.error("[CRASH]", err);
+  await backupDatabase("crash");
+  process.exit(1);
+});
+
+process.on("unhandledRejection", async (err) => {
+  console.error("[REJECT]", err);
+  await backupDatabase("reject");
+});
